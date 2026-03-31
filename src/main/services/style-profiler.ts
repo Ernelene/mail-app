@@ -8,7 +8,7 @@ import {
   saveCorrespondentProfile,
   getSentEmailCountToRecipient,
 } from "../db";
-import type { GmailClient } from "./gmail-client";
+import type { MailProvider } from "./mail-provider";
 import { createLogger } from "./logger";
 
 const log = createLogger("style-profiler");
@@ -188,7 +188,7 @@ type SentEmailRow = {
  * return them in SentEmailRow shape for immediate use as style examples.
  */
 async function fetchAndCacheSentEmails(
-  gmailClient: GmailClient,
+  gmailClient: MailProvider,
   query: string,
   accountId: string,
   limit: number,
@@ -243,7 +243,7 @@ const MIN_EXAMPLES = 3;
 async function selectExamples(
   recipientEmail: string,
   accountId: string,
-  gmailClient?: GmailClient | null,
+  gmailClient?: MailProvider | null,
 ): Promise<ExampleEmail[]> {
   const examples: ExampleEmail[] = [];
   const seenIds = new Set<string>();
@@ -312,7 +312,7 @@ export async function buildStyleContext(
   recipientEmail: string,
   accountId: string,
   stylePrompt: string,
-  gmailClient?: GmailClient | null,
+  gmailClient?: MailProvider | null,
 ): Promise<string> {
   // Get or compute correspondent profile
   let profile = getCorrespondentProfile(recipientEmail, accountId);

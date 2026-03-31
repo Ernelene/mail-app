@@ -1,5 +1,5 @@
 import { BrowserWindow } from "electron";
-import { type GmailClient } from "./gmail-client";
+import type { MailProvider } from "./mail-provider";
 import { getAllEmailIds, saveEmail } from "../db";
 import { createLogger } from "./logger";
 
@@ -27,7 +27,7 @@ class BackgroundSyncService {
    * Start background sync of all mail for an account.
    * This syncs emails outside INBOX (sent, archived, etc.) to enable local search.
    */
-  async startAllMailSync(accountId: string, client: GmailClient): Promise<void> {
+  async startAllMailSync(accountId: string, client: MailProvider): Promise<void> {
     const existingState = this.accountStates.get(accountId);
     if (existingState?.isRunning) {
       log.info(`[BackgroundSync] Already running for ${accountId}`);
@@ -115,7 +115,7 @@ class BackgroundSyncService {
    */
   private async syncBatch(
     accountId: string,
-    client: GmailClient,
+    client: MailProvider,
     batch: Array<{ id: string; threadId: string }>,
   ): Promise<void> {
     for (const { id } of batch) {

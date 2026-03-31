@@ -12,7 +12,7 @@ import {
   type OutboxItem,
   type OutboxStats,
 } from "../db";
-import type { GmailClient } from "./gmail-client";
+import type { MailProvider } from "./mail-provider";
 import { createLogger } from "./logger";
 
 const log = createLogger("outbox");
@@ -56,15 +56,15 @@ const MAX_RETRIES = 3;
 const BATCH_SIZE = 10;
 
 class OutboxService extends EventEmitter {
-  private clientResolver?: (accountId: string) => GmailClient | null;
+  private clientResolver?: (accountId: string) => MailProvider | null;
   private processing: boolean = false;
   private recentSentCache: Map<string, SentCacheEntry> = new Map();
 
   /**
-   * Set the function to resolve GmailClient for an account ID
+   * Set the function to resolve MailProvider for an account ID
    * Called from main/index.ts after sync service is initialized
    */
-  setClientResolver(resolver: (accountId: string) => GmailClient | null): void {
+  setClientResolver(resolver: (accountId: string) => MailProvider | null): void {
     this.clientResolver = resolver;
   }
 

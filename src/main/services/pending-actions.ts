@@ -1,7 +1,7 @@
 import { EventEmitter } from "events";
 import { networkMonitor } from "./network-monitor";
 import { isNetworkError } from "./network-errors";
-import type { GmailClient } from "./gmail-client";
+import type { MailProvider } from "./mail-provider";
 import { createLogger } from "./logger";
 
 const log = createLogger("pending-actions");
@@ -22,10 +22,10 @@ const MAX_RETRIES = 3;
 class PendingActionsQueue extends EventEmitter {
   private queue: PendingAction[] = [];
   private processing = false;
-  private clientResolver?: (accountId: string) => GmailClient | null;
+  private clientResolver?: (accountId: string) => MailProvider | null;
   private nextId = 0;
 
-  setClientResolver(resolver: (accountId: string) => GmailClient | null): void {
+  setClientResolver(resolver: (accountId: string) => MailProvider | null): void {
     this.clientResolver = resolver;
   }
 

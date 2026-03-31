@@ -17,6 +17,7 @@ import type {
   ComposeMessageOptions,
   AttachmentMeta,
 } from "../../shared/types";
+import type { MailProvider, SyncChanges } from "./mail-provider";
 import { getAccounts } from "../db";
 import { getDataDir } from "../data-dir";
 import { extractEmail } from "../utils/address-formatting";
@@ -134,11 +135,12 @@ export function isAuthError(error: unknown): boolean {
   return false;
 }
 
-export class GmailClient {
+export class GmailClient implements MailProvider {
+  readonly providerType = "gmail" as const;
   private oauth2Client: OAuth2Client | null = null;
   private gmail: ReturnType<typeof google.gmail> | null = null;
   private lastHistoryId: string | null = null;
-  private accountId: string; // For multi-account support
+  readonly accountId: string; // For multi-account support
   private cachedAccountInfo: { email: string; displayName: string | null } | null | undefined =
     undefined;
   private pendingOAuthServer: Server | null = null;
@@ -1604,13 +1606,7 @@ export class GmailClient {
   }
 
   // Get changes since last sync using History API (efficient incremental sync)
-  async getHistoryChanges(startHistoryId: string): Promise<{
-    newMessageIds: string[];
-    deletedMessageIds: string[];
-    readMessageIds: string[];
-    unreadMessageIds: string[];
-    historyId: string;
-  }> {
+  async getHistoryChanges(startHistoryId: string): Promise<SyncChanges> {
     const gmail = this.gmail!;
 
     const newMessageIds: string[] = [];
@@ -1706,7 +1702,7 @@ export class GmailClient {
         deletedMessageIds: [...deletedSet],
         readMessageIds: [...new Set(readMessageIds)].filter(filterHandled),
         unreadMessageIds: [...new Set(unreadMessageIds)].filter(filterHandled),
-        historyId: latestHistoryId,
+        cursor: latestHistoryId,
       };
     } catch (error: unknown) {
       // History ID might be too old (404 error) - need full resync

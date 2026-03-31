@@ -1,4 +1,5 @@
-import { type GmailClient, isAuthError } from "./gmail-client";
+import { isAuthError } from "./gmail-client";
+import type { MailProvider } from "./mail-provider";
 import {
   saveEmail,
   deleteEmail,
@@ -35,7 +36,7 @@ export type AccountInfo = {
 };
 
 type SyncAccount = {
-  client: GmailClient;
+  client: MailProvider;
   email: string;
   intervalId: NodeJS.Timeout | null;
   status: SyncStatus;
@@ -115,14 +116,14 @@ class EmailSyncService {
   /**
    * Get client for an account (exposed for outbox service)
    */
-  getClientForAccount(accountId: string): GmailClient | null {
+  getClientForAccount(accountId: string): MailProvider | null {
     return this.accounts.get(accountId)?.client || null;
   }
 
   /**
-   * Register a Gmail client for a specific account
+   * Register a mail provider client for a specific account
    */
-  async registerAccount(client: GmailClient): Promise<AccountInfo> {
+  async registerAccount(client: MailProvider): Promise<AccountInfo> {
     const accountId = client.getAccountId();
 
     // Get profile to retrieve email address, and display name for account setup
@@ -882,8 +883,8 @@ class EmailSyncService {
 
     const changes = await client.getHistoryChanges(startHistoryId);
 
-    // Save new history ID
-    setHistoryId(accountId, changes.historyId);
+    // Save new sync cursor (historyId for Gmail, deltaLink for Outlook, etc.)
+    setHistoryId(accountId, changes.cursor);
 
     // Snapshot threads that have drafts on emails about to be deleted.
     // Must happen BEFORE deleteEmail() removes the draft rows from DB,

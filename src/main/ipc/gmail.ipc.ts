@@ -1,5 +1,7 @@
 import { ipcMain } from "electron";
 import { GmailClient } from "../services/gmail-client";
+import type { MailProvider } from "../services/mail-provider";
+import { createMailProvider } from "../services/provider-factory";
 import { saveEmail, getEmailIds, getInboxEmails, getEmail, saveAccount, getAccounts } from "../db";
 import { getConfig } from "./settings.ipc";
 import type { IpcResponse, DashboardEmail } from "../../shared/types";
@@ -12,7 +14,7 @@ const isTestMode = process.env.EXO_TEST_MODE === "true";
 const isDemoMode = process.env.EXO_DEMO_MODE === "true";
 const useFakeData = isTestMode || isDemoMode;
 
-const gmailClients = new Map<string, GmailClient>();
+const mailClients = new Map<string, MailProvider>();
 
 function resolveTargetAccountId(accountId?: string): string {
   const trimmedAccountId = accountId?.trim();
@@ -34,15 +36,20 @@ function resolveTargetAccountId(accountId?: string): string {
   return fallbackId;
 }
 
-export async function getClient(accountId = "default"): Promise<GmailClient> {
-  const existing = gmailClients.get(accountId);
+export async function getClient(accountId = "default"): Promise<MailProvider> {
+  const existing = mailClients.get(accountId);
   if (existing) {
     return existing;
   }
 
-  const client = new GmailClient(accountId);
+  // Look up account's provider type from DB; default to gmail for backward compat
+  const accounts = getAccounts();
+  const account = accounts.find((a) => a.id === accountId);
+  const providerType = account?.provider || "gmail";
+
+  const client = createMailProvider(accountId, providerType);
   await client.connect();
-  gmailClients.set(accountId, client);
+  mailClients.set(accountId, client);
   return client;
 }
 
@@ -117,7 +124,7 @@ export function registerGmailIpc(): void {
 
     try {
       // Reset clients to force re-auth
-      gmailClients.clear();
+      mailClients.clear();
       const client = await getClient("default");
 
       // Get the user's profile to save the account

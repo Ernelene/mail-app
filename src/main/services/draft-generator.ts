@@ -1,5 +1,5 @@
 import { createMessage } from "./anthropic-service";
-import type { GmailClient } from "./gmail-client";
+import type { MailProvider } from "./mail-provider";
 import { CalendaringAgent } from "./calendaring-agent";
 import { getEnrichmentBySender } from "../extensions/enrichment-store";
 import {
@@ -273,7 +273,7 @@ ${email.body}`,
   }
 
   async createDraft(
-    gmailClient: GmailClient,
+    gmailClient: MailProvider,
     email: Email,
     draftBody: string,
     dryRun: boolean = false,

@@ -5,7 +5,7 @@ import {
   getScheduledMessageStats,
   type ScheduledMessageRow,
 } from "../db";
-import type { GmailClient } from "./gmail-client";
+import type { MailProvider } from "./mail-provider";
 import { createLogger } from "./logger";
 
 const log = createLogger("scheduled-send");
@@ -16,15 +16,15 @@ const CHECK_INTERVAL = 30_000;
 type ScheduledSendEvent = "sending" | "sent" | "failed" | "statsChanged";
 
 class ScheduledSendService extends EventEmitter {
-  private clientResolver?: (accountId: string) => GmailClient | null;
+  private clientResolver?: (accountId: string) => MailProvider | null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private processing = false;
 
   /**
-   * Set the function to resolve GmailClient for an account ID.
+   * Set the function to resolve MailProvider for an account ID.
    * Called from main/index.ts after sync service is initialized.
    */
-  setClientResolver(resolver: (accountId: string) => GmailClient | null): void {
+  setClientResolver(resolver: (accountId: string) => MailProvider | null): void {
     this.clientResolver = resolver;
   }
 

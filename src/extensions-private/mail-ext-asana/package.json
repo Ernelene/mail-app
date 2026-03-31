@@ -1,0 +1,39 @@
+{
+  "name": "mail-ext-asana",
+  "version": "1.0.0",
+  "description": "Asana integration — link emails to tasks and create tasks from emails",
+  "main": "./src/index.ts",
+  "mailExtension": {
+    "id": "asana",
+    "displayName": "Asana",
+    "description": "Link emails to Asana tasks and create new tasks from emails",
+    "builtIn": false,
+    "activationEvents": ["onEmail"],
+    "contributes": {
+      "sidebarPanels": [
+        {
+          "id": "asana-tasks",
+          "title": "Asana",
+          "priority": 80,
+          "scope": "email"
+        }
+      ],
+      "settings": [
+        {
+          "id": "enabled",
+          "type": "boolean",
+          "default": true,
+          "title": "Enable Asana integration",
+          "description": "Show linked Asana tasks in the email sidebar"
+        },
+        {
+          "id": "workspace_id",
+          "type": "string",
+          "default": "",
+          "title": "Workspace GID",
+          "description": "Your Asana workspace GID (found in the URL when viewing workspace settings)"
+        }
+      ]
+    }
+  }
+}

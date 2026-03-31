@@ -1,5 +1,6 @@
 import { ipcMain } from "electron";
-import { GmailClient } from "../services/gmail-client";
+import type { MailProvider } from "../services/mail-provider";
+import { createMailProvider } from "../services/provider-factory";
 import { emailSyncService, type AccountInfo } from "../services/email-sync";
 import { getAccounts, saveAccount } from "../db";
 import type { IpcResponse, OnboardingSyncResult } from "../../shared/types";
@@ -9,11 +10,11 @@ const isDemoMode = process.env.EXO_DEMO_MODE === "true";
 const useFakeData = isTestMode || isDemoMode;
 
 // Store clients created during onboarding so sync:init can reuse them
-const onboardingClients: Map<string, GmailClient> = new Map();
+const onboardingClients: Map<string, MailProvider> = new Map();
 // Track actively running syncs (separate from client cache which persists after success)
 const onboardingSyncInProgress = new Set<string>();
 
-export function getOnboardingClient(accountId: string): GmailClient | undefined {
+export function getOnboardingClient(accountId: string): MailProvider | undefined {
   return onboardingClients.get(accountId);
 }
 
@@ -53,7 +54,10 @@ export function registerOnboardingIpc(): void {
 
       onboardingSyncInProgress.add(accountId);
       try {
-        const client = new GmailClient(accountId);
+        // Look up provider type from the account record (set during accounts:add)
+        const accountRecord = getAccounts().find((a) => a.id === accountId);
+        const providerType = accountRecord?.provider || "gmail";
+        const client = createMailProvider(accountId, providerType);
         await client.connect();
 
         // Register with sync service (gets profile, sets up for full sync)

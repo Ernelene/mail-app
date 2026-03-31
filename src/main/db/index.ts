@@ -393,6 +393,19 @@ const NUMBERED_MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 2,
+    name: "add_provider_column_to_accounts",
+    up: (db) => {
+      // Add provider column to accounts table. Defaults to "gmail" for
+      // backward compatibility with all existing accounts.
+      const tableInfo = db.prepare("PRAGMA table_info(accounts)").all() as Array<{ name: string }>;
+      const hasProvider = tableInfo.some((col) => col.name === "provider");
+      if (!hasProvider) {
+        db.exec("ALTER TABLE accounts ADD COLUMN provider TEXT NOT NULL DEFAULT 'gmail'");
+      }
+    },
+  },
 ];
 
 function runNumberedMigrations(db: DatabaseInstance): void {
@@ -2006,6 +2019,7 @@ export type AccountRecord = {
   displayName?: string;
   isPrimary: boolean;
   addedAt: number;
+  provider: "gmail" | "outlook";
 };
 
 export function saveAccount(
@@ -2013,19 +2027,20 @@ export function saveAccount(
   email: string,
   displayName?: string,
   isPrimary: boolean = false,
+  provider: "gmail" | "outlook" = "gmail",
 ): void {
   const db = getDatabase();
   const stmt = db.prepare(`
-    INSERT OR REPLACE INTO accounts (id, email, display_name, is_primary, added_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT OR REPLACE INTO accounts (id, email, display_name, is_primary, added_at, provider)
+    VALUES (?, ?, ?, ?, ?, ?)
   `);
-  stmt.run(accountId, email, displayName || null, isPrimary ? 1 : 0, Date.now());
+  stmt.run(accountId, email, displayName || null, isPrimary ? 1 : 0, Date.now(), provider);
 }
 
 export function getAccounts(): AccountRecord[] {
   const db = getDatabase();
   const stmt = db.prepare(
-    "SELECT id, email, display_name as displayName, is_primary as isPrimary, added_at as addedAt FROM accounts ORDER BY added_at ASC",
+    "SELECT id, email, display_name as displayName, is_primary as isPrimary, added_at as addedAt, COALESCE(provider, 'gmail') as provider FROM accounts ORDER BY added_at ASC",
   );
   const rows = stmt.all() as Array<{
     id: string;
@@ -2033,6 +2048,7 @@ export function getAccounts(): AccountRecord[] {
     displayName: string | null;
     isPrimary: number;
     addedAt: number;
+    provider: string;
   }>;
   return rows.map((row) => ({
     id: row.id,
@@ -2040,6 +2056,7 @@ export function getAccounts(): AccountRecord[] {
     displayName: row.displayName || undefined,
     isPrimary: Boolean(row.isPrimary),
     addedAt: row.addedAt,
+    provider: (row.provider === "outlook" ? "outlook" : "gmail") as "gmail" | "outlook",
   }));
 }
 

@@ -1,5 +1,7 @@
 import { ipcMain, BrowserWindow } from "electron";
 import { GmailClient, isAuthError } from "../services/gmail-client";
+import type { MailProvider } from "../services/mail-provider";
+import { createMailProvider } from "../services/provider-factory";
 import { emailSyncService, type SyncStatus, type AccountInfo } from "../services/email-sync";
 import { prefetchService } from "../services/prefetch-service";
 import { getExtensionHost } from "../extensions";
@@ -44,10 +46,10 @@ const isTestMode = process.env.EXO_TEST_MODE === "true";
 const isDemoMode = process.env.EXO_DEMO_MODE === "true";
 const useFakeData = isTestMode || isDemoMode;
 
-// Store active clients for each account
-const activeClients: Map<string, GmailClient> = new Map();
+// Store active clients for each account (provider-agnostic)
+const activeClients: Map<string, MailProvider> = new Map();
 // Track in-progress OAuth flow so it can be cancelled
-let pendingAddClient: GmailClient | null = null;
+let pendingAddClient: MailProvider | null = null;
 let retryingConnections = false;
 
 // Email data saved before optimistic trash deletion, keyed by emailId.
@@ -56,7 +58,7 @@ const trashedEmailData: Map<string, DashboardEmail> = new Map();
 
 // Service wrapper for accessing sync functionality from other IPC handlers
 export const getEmailSyncService = () => ({
-  getClientForAccount(accountId: string): GmailClient | null {
+  getClientForAccount(accountId: string): MailProvider | null {
     return activeClients.get(accountId) || null;
   },
   syncService: emailSyncService,
@@ -80,7 +82,7 @@ async function retryFailedConnections(): Promise<void> {
 
     for (const account of disconnected) {
       try {
-        const client = new GmailClient(account.id);
+        const client = createMailProvider(account.id, account.provider);
         await client.connect();
 
         const accountInfo = await emailSyncService.registerAccount(client);
@@ -309,7 +311,10 @@ export function registerSyncIpc(): void {
   // Add a new account
   ipcMain.handle(
     "accounts:add",
-    async (_, { accountId }: { accountId?: string }): Promise<IpcResponse<AccountInfo>> => {
+    async (
+      _,
+      { accountId, provider }: { accountId?: string; provider?: "gmail" | "outlook" },
+    ): Promise<IpcResponse<AccountInfo>> => {
       if (useFakeData) {
         return {
           success: true,
@@ -319,6 +324,7 @@ export function registerSyncIpc(): void {
 
       // Generate account ID before try block so it's accessible in catch for cleanup
       const id = accountId || `account-${Date.now()}`;
+      const providerType = provider || "gmail";
 
       try {
         const sendProgress = (phase: string) => {
@@ -327,9 +333,9 @@ export function registerSyncIpc(): void {
           }
         };
 
-        // Create client and connect
+        // Create client and connect (uses provider factory)
         sendProgress("Authorizing...");
-        const client = new GmailClient(id);
+        const client = createMailProvider(id, providerType);
         pendingAddClient = client;
         await client.connect();
         pendingAddClient = null;
@@ -338,10 +344,10 @@ export function registerSyncIpc(): void {
         sendProgress("Connecting account...");
         const accountInfo = await emailSyncService.registerAccount(client);
 
-        // Save to database
+        // Save to database (including provider type)
         const accounts = getAccounts();
         const isPrimary = accounts.length === 0;
-        saveAccount(id, accountInfo.email, accountInfo.displayName, isPrimary);
+        saveAccount(id, accountInfo.email, accountInfo.displayName, isPrimary, providerType);
 
         // Store client reference
         activeClients.set(id, client);
@@ -400,8 +406,10 @@ export function registerSyncIpc(): void {
           await client.disconnect();
           activeClients.delete(accountId);
         } else {
-          // No active client, but still try to clean up tokens
-          const orphanClient = new GmailClient(accountId);
+          // No active client, but still try to clean up tokens.
+          // Look up the account's provider type to create the right client.
+          const accountRecord = getAccounts().find((a) => a.id === accountId);
+          const orphanClient = createMailProvider(accountId, accountRecord?.provider || "gmail");
           await orphanClient.removeTokens();
         }
 
@@ -807,8 +815,8 @@ export function registerSyncIpc(): void {
         }
 
         try {
-          // Create client for existing account
-          const client = new GmailClient(account.id);
+          // Create client for existing account (using provider factory)
+          const client = createMailProvider(account.id, account.provider);
           const tConnect = performance.now();
           await client.connect();
           log.info(
@@ -846,8 +854,8 @@ export function registerSyncIpc(): void {
           log.error({ err: err }, `[Sync] Failed to connect account ${account.id}`);
 
           // Still store the client reference so reauth can use it
-          const client = new GmailClient(account.id);
-          activeClients.set(account.id, client);
+          const fallbackClient = createMailProvider(account.id, account.provider);
+          activeClients.set(account.id, fallbackClient);
 
           connectedAccounts.push({
             accountId: account.id,
