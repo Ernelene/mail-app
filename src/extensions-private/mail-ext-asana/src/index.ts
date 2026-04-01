@@ -4,7 +4,7 @@
  * Provides:
  *   - Sidebar enrichment panel showing linked Asana tasks for each email
  *   - Task creation from emails (via enrichment data)
- *   - OAuth2 authentication with Asana
+ *   - Authentication via Personal Access Token (PAT)
  */
 
 import type {
@@ -21,23 +21,21 @@ const extension: ExtensionModule = {
 
     const asanaClient = new AsanaClient(context);
 
-    // Register auth handler so the extension host can trigger auth when needed.
-    // For the initial version, we support personal access tokens (PAT) entered
-    // by the user in settings. Full OAuth2 can be added later.
+    // Register auth handler — verifies the stored PAT when the user
+    // clicks "Login" on the extension auth banner or in the setup wizard.
+    // The PAT is saved to extension secrets by the SetupWizard before
+    // this handler is called.
     api.registerAuthHandler(
       async () => {
-        // This handler is invoked when the user clicks "Authenticate" on the
-        // extension auth banner. For now, we check if a token was already set
-        // in secrets (e.g. via settings UI) and validate it.
         const loaded = await asanaClient.loadToken();
         if (!loaded) {
           throw new Error(
-            "No Asana token found. Add your Personal Access Token in Settings → Extensions → Asana.",
+            "No Asana token found. Enter your Personal Access Token to connect.",
           );
         }
         const valid = await asanaClient.isAuthenticated();
         if (!valid) {
-          throw new Error("Asana token is invalid or expired. Please update it in Settings.");
+          throw new Error("Asana token is invalid or expired. Please check your token and try again.");
         }
         context.logger.info("Asana authentication verified");
       },

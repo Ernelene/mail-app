@@ -1,5 +1,5 @@
-import { isAuthError } from "./gmail-client";
 import type { MailProvider } from "./mail-provider";
+import { isProviderAuthError as isAuthError } from "./mail-provider";
 import {
   saveEmail,
   deleteEmail,
@@ -558,10 +558,14 @@ class EmailSyncService {
     const { client } = account;
     log.info(`[Sync] fullSync starting for ${account.email}`);
 
-    // Get profile to update history ID
+    // Get profile to update history ID.
+    // For Gmail, getProfile() returns a real historyId.
+    // For Outlook, historyId is "" — we initialize the real cursor after the sync.
     const profile = await client.getProfile();
-    setHistoryId(accountId, profile.historyId);
-    log.info(`[Sync] fullSync got profile, historyId=${profile.historyId}`);
+    if (profile.historyId) {
+      setHistoryId(accountId, profile.historyId);
+    }
+    log.info(`[Sync] fullSync got profile, historyId=${profile.historyId || "(none)"}`);
 
     // Get emails with INBOX label (the actual inbox, not all mail)
     const searchResults = await client.getEmailsByLabel("INBOX", EmailSyncService.MAX_SYNC_EMAILS);
@@ -721,6 +725,20 @@ class EmailSyncService {
 
     // Sync all sent emails (for the Sent view)
     await this.syncAllSentEmails(accountId);
+
+    // Initialize the sync cursor for providers that need it (e.g. Outlook delta queries).
+    // This must happen after the full sync so the cursor captures the current state.
+    if (client.initSyncCursor) {
+      try {
+        const cursor = await client.initSyncCursor();
+        if (cursor) {
+          setHistoryId(accountId, cursor);
+          log.info(`[Sync] Initialized sync cursor for ${account.email}`);
+        }
+      } catch (err) {
+        log.warn({ err }, `[Sync] Failed to initialize sync cursor for ${account.email}`);
+      }
+    }
 
     return newEmails;
   }

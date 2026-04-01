@@ -6,7 +6,16 @@ interface SetupWizardProps {
   onComplete: () => void;
 }
 
-type Step = "loading" | "credentials" | "apikey" | "oauth" | "extensions" | "analytics";
+type Step =
+  | "loading"
+  | "provider"
+  | "credentials"
+  | "apikey"
+  | "oauth"
+  | "extensions"
+  | "analytics";
+
+type MailProviderType = "gmail" | "outlook";
 
 interface ExtensionAuthInfo {
   extensionId: string;
@@ -32,47 +41,80 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
 
   // Extension auth state
   const [extensionAuths, setExtensionAuths] = useState<ExtensionAuthInfo[]>([]);
-  const [authenticatingExtension, setAuthenticatingExtension] = useState<string | null>(null);
 
   // Analytics opt-in (default ON — session replay is bundled under analytics)
   const [analyticsEnabled, setAnalyticsEnabled] = useState(true);
+  const [authenticatingExtension, setAuthenticatingExtension] = useState<string | null>(null);
+
+  // Provider selection
+  const [selectedProvider, setSelectedProvider] = useState<MailProviderType>("gmail");
+  // Which provider already has credentials saved (from check-auth)
+  const [configuredProvider, setConfiguredProvider] = useState<MailProviderType | null>(null);
+
+  // Asana Personal Access Token input
+  const [asanaPat, setAsanaPat] = useState("");
+  const [showAsanaTokenInput, setShowAsanaTokenInput] = useState<string | null>(null);
 
   // Check what's already configured and skip to the right step.
   useEffect(() => {
     (
       window.api.gmail.checkAuth() as Promise<
-        IpcResponse<{ hasCredentials: boolean; hasTokens: boolean; hasAnthropicKey: boolean }>
+        IpcResponse<{
+          hasCredentials: boolean;
+          hasTokens: boolean;
+          hasAnthropicKey: boolean;
+          configuredProvider?: MailProviderType;
+        }>
       >
     )
       .then((authResult) => {
         if (authResult.success) {
-          const { hasCredentials, hasAnthropicKey, hasTokens } = authResult.data;
+          const { hasCredentials, hasAnthropicKey, hasTokens, configuredProvider } =
+            authResult.data;
+
+          // Pre-select the provider that already has credentials saved
+          if (configuredProvider) {
+            setSelectedProvider(configuredProvider);
+            setConfiguredProvider(configuredProvider);
+          }
 
           const flow: Step[] = [];
-          if (!hasCredentials) flow.push("credentials");
+          // Always show provider selection if OAuth hasn't completed yet —
+          // the user may want to switch providers even if credentials exist.
+          if (!hasTokens) flow.push("provider");
+          // Always include credentials in flow when not fully authed —
+          // the user might switch providers and need to enter new credentials.
+          // The provider step's Continue button skips this dynamically if
+          // the selected provider already has credentials.
+          if (!hasTokens) flow.push("credentials");
           if (!hasAnthropicKey) flow.push("apikey");
           if (!hasTokens) flow.push("oauth");
           flow.push("extensions");
           flow.push("analytics");
           setVisibleSteps(flow);
 
-          if (!hasCredentials) {
-            setStep("credentials");
+          if (!hasTokens) {
+            setStep("provider");
           } else if (!hasAnthropicKey) {
             setStep("apikey");
-          } else if (!hasTokens) {
-            setStep("oauth");
           } else {
             enterExtensionsStep();
           }
         } else {
-          setVisibleSteps(["credentials", "apikey", "oauth", "extensions", "analytics"]);
-          setStep("credentials");
+          setVisibleSteps([
+            "provider",
+            "credentials",
+            "apikey",
+            "oauth",
+            "extensions",
+            "analytics",
+          ]);
+          setStep("provider");
         }
       })
       .catch(() => {
-        setVisibleSteps(["credentials", "apikey", "oauth", "extensions", "analytics"]);
-        setStep("credentials");
+        setVisibleSteps(["provider", "credentials", "apikey", "oauth", "extensions", "analytics"]);
+        setStep("provider");
       });
   }, []);
 
@@ -89,6 +131,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
       const result = (await window.api.gmail.saveCredentials(
         googleClientId.trim(),
         googleClientSecret.trim(),
+        selectedProvider,
       )) as IpcResponse<void>;
       if (result.success) {
         const credIdx = visibleSteps.indexOf("credentials");
@@ -152,7 +195,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
     setError(null);
 
     try {
-      const result = await window.api.gmail.startOAuth();
+      const result = await window.api.gmail.startOAuth(selectedProvider);
       if (result.success) {
         await enterExtensionsStep();
       } else {
@@ -193,10 +236,28 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
   }, []);
 
   const handleExtensionAuth = async (extensionId: string, authType: "extension" | "agent") => {
+    // For Asana, show the PAT input form instead of triggering OAuth
+    if (extensionId === "asana" && authType === "extension" && !asanaPat.trim()) {
+      setShowAsanaTokenInput(extensionId);
+      return;
+    }
+
     setAuthenticatingExtension(extensionId);
     setError(null);
 
     try {
+      // If this is Asana with a PAT, save the token first then trigger auth check
+      if (extensionId === "asana" && asanaPat.trim()) {
+        const saveResult = (await window.api.extensions.saveSecrets(extensionId, {
+          asana_access_token: asanaPat.trim(),
+        })) as IpcResponse<void>;
+        if (!saveResult.success) {
+          setError(saveResult.error ?? "Failed to save Asana token");
+          setAuthenticatingExtension(null);
+          return;
+        }
+      }
+
       let success = false;
       if (authType === "agent") {
         const result = (await window.api.agent.authenticate(extensionId)) as IpcResponse<{
@@ -221,6 +282,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
       }
 
       if (success) {
+        setShowAsanaTokenInput(null);
         setExtensionAuths((prev) =>
           prev.map((ext) => (ext.extensionId === extensionId ? { ...ext, needsAuth: false } : ext)),
         );
@@ -252,43 +314,202 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
             </div>
           )}
 
-          {step === "credentials" && (
+          {step === "provider" && (
             <>
               <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">
-                Google Cloud Credentials
+                Choose Your Email Provider
               </h2>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Exo needs Google OAuth credentials to access your Gmail account. You'll need to
-                create a Google Cloud project with the Gmail API enabled.
+                Exo supports both Gmail and Outlook. Select the provider you want to connect.
               </p>
 
-              <div className="bg-blue-50 dark:bg-blue-900/30 p-4 rounded-lg mb-6">
-                <h3 className="font-semibold text-blue-900 dark:text-blue-200 mb-2">
-                  Setup steps:
-                </h3>
-                <ol className="text-sm text-blue-800 dark:text-blue-300 space-y-2 list-decimal list-inside">
-                  <li>
-                    Go to the{" "}
-                    <a
-                      href="https://console.cloud.google.com/apis/credentials"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="underline hover:no-underline"
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <button
+                  onClick={() => setSelectedProvider("gmail")}
+                  className={`p-4 border-2 rounded-lg text-left transition-colors ${
+                    selectedProvider === "gmail"
+                      ? "border-blue-600 dark:border-blue-400 bg-blue-50 dark:bg-blue-900/30"
+                      : "border-gray-200 dark:border-gray-600 hover:border-blue-300 dark:hover:border-blue-700"
+                  }`}
+                >
+                  <div className="flex items-center gap-3 mb-2">
+                    <svg
+                      className="w-6 h-6"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      xmlns="http://www.w3.org/2000/svg"
                     >
-                      Google Cloud Console
-                    </a>
-                  </li>
-                  <li>Create a project (or select an existing one)</li>
-                  <li>
-                    Enable the <strong>Gmail API</strong> and <strong>Google Calendar API</strong>
-                  </li>
-                  <li>Go to Credentials → Create Credentials → OAuth client ID</li>
-                  <li>
-                    Choose <strong>Desktop app</strong> as the application type
-                  </li>
-                  <li>Copy the Client ID and Client Secret below</li>
-                </ol>
+                      <path
+                        d="M22 6.5V17.5C22 18.88 20.88 20 19.5 20H4.5C3.12 20 2 18.88 2 17.5V6.5C2 5.12 3.12 4 4.5 4H19.5C20.88 4 22 5.12 22 6.5Z"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M22 6.5L12 13L2 6.5"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    <span className="font-semibold text-gray-900 dark:text-gray-100">Gmail</span>
+                  </div>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    Connect your Google account
+                  </p>
+                </button>
+
+                <button
+                  onClick={() => setSelectedProvider("outlook")}
+                  className={`p-4 border-2 rounded-lg text-left transition-colors ${
+                    selectedProvider === "outlook"
+                      ? "border-blue-600 dark:border-blue-400 bg-blue-50 dark:bg-blue-900/30"
+                      : "border-gray-200 dark:border-gray-600 hover:border-blue-300 dark:hover:border-blue-700"
+                  }`}
+                >
+                  <div className="flex items-center gap-3 mb-2">
+                    <svg
+                      className="w-6 h-6"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      xmlns="http://www.w3.org/2000/svg"
+                    >
+                      <path
+                        d="M2 6.5V17.5C2 18.88 3.12 20 4.5 20H19.5C20.88 20 22 18.88 22 17.5V6.5C22 5.12 20.88 4 19.5 4H4.5C3.12 4 2 5.12 2 6.5Z"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M22 6.5L12 13L2 6.5"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    <span className="font-semibold text-gray-900 dark:text-gray-100">Outlook</span>
+                  </div>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    Connect your Microsoft account
+                  </p>
+                </button>
               </div>
+
+              <button
+                onClick={() => {
+                  // If the selected provider already has credentials saved, skip to the next step
+                  if (selectedProvider === configuredProvider) {
+                    const credIdx = visibleSteps.indexOf("credentials");
+                    if (credIdx !== -1) {
+                      // Skip credentials, go to the step after it
+                      const next = visibleSteps[credIdx + 1];
+                      setStep(next ?? "apikey");
+                    } else {
+                      // credentials not in flow, go to next after provider
+                      const provIdx = visibleSteps.indexOf("provider");
+                      const next = visibleSteps[provIdx + 1];
+                      setStep(next ?? "apikey");
+                    }
+                  } else {
+                    setStep("credentials");
+                  }
+                }}
+                disabled={isLoading}
+                className="w-full py-3 bg-blue-600 dark:bg-blue-500 text-white font-medium rounded-lg hover:bg-blue-700 dark:hover:bg-blue-600 transition-colors disabled:opacity-50"
+              >
+                Continue
+              </button>
+            </>
+          )}
+
+          {step === "credentials" && (
+            <>
+              {selectedProvider === "gmail" ? (
+                <>
+                  <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">
+                    Google Cloud Credentials
+                  </h2>
+                  <p className="text-gray-600 dark:text-gray-400 mb-6">
+                    Exo needs Google OAuth credentials to access your Gmail account. You'll need to
+                    create a Google Cloud project with the Gmail API enabled.
+                  </p>
+
+                  <div className="bg-blue-50 dark:bg-blue-900/30 p-4 rounded-lg mb-6">
+                    <h3 className="font-semibold text-blue-900 dark:text-blue-200 mb-2">
+                      Setup steps:
+                    </h3>
+                    <ol className="text-sm text-blue-800 dark:text-blue-300 space-y-2 list-decimal list-inside">
+                      <li>
+                        Go to the{" "}
+                        <a
+                          href="https://console.cloud.google.com/apis/credentials"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="underline hover:no-underline"
+                        >
+                          Google Cloud Console
+                        </a>
+                      </li>
+                      <li>Create a project (or select an existing one)</li>
+                      <li>
+                        Enable the <strong>Gmail API</strong> and{" "}
+                        <strong>Google Calendar API</strong>
+                      </li>
+                      <li>Go to Credentials → Create Credentials → OAuth client ID</li>
+                      <li>
+                        Choose <strong>Desktop app</strong> as the application type
+                      </li>
+                      <li>Copy the Client ID and Client Secret below</li>
+                    </ol>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">
+                    Microsoft Azure AD Credentials
+                  </h2>
+                  <p className="text-gray-600 dark:text-gray-400 mb-6">
+                    Exo needs Microsoft OAuth credentials to access your Outlook account. You'll
+                    need to register an app in the Microsoft Entra admin center.
+                  </p>
+
+                  <div className="bg-blue-50 dark:bg-blue-900/30 p-4 rounded-lg mb-6">
+                    <h3 className="font-semibold text-blue-900 dark:text-blue-200 mb-2">
+                      Setup steps:
+                    </h3>
+                    <ol className="text-sm text-blue-800 dark:text-blue-300 space-y-2 list-decimal list-inside">
+                      <li>
+                        Go to the{" "}
+                        <a
+                          href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="underline hover:no-underline"
+                        >
+                          Microsoft Entra admin center
+                        </a>
+                      </li>
+                      <li>Click "New registration"</li>
+                      <li>
+                        Enter an app name and select "Accounts in any organizational directory and
+                        personal Microsoft accounts"
+                      </li>
+                      <li>
+                        Set the redirect URI to <strong>msal&lt;client-id&gt;://auth</strong>{" "}
+                        (you'll get the client ID after registration)
+                      </li>
+                      <li>Click "Register"</li>
+                      <li>Copy the Application (client) ID below as Client ID</li>
+                      <li>Go to "Certificates & secrets" → "New client secret"</li>
+                      <li>Copy the secret value below as Client Secret</li>
+                    </ol>
+                  </div>
+                </>
+              )}
 
               <div className="space-y-4 mb-6">
                 <div>
@@ -299,7 +520,11 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
                     type="text"
                     value={googleClientId}
                     onChange={(e) => setGoogleClientId(e.target.value)}
-                    placeholder="your-client-id.apps.google..."
+                    placeholder={
+                      selectedProvider === "gmail"
+                        ? "your-client-id.apps.google..."
+                        : "your-application-client-id"
+                    }
                     className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                   />
                 </div>
@@ -400,11 +625,12 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
           {step === "oauth" && (
             <>
               <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">
-                Authorize Gmail Access
+                Authorize {selectedProvider === "gmail" ? "Gmail" : "Outlook"} Access
               </h2>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
                 Click the button below to authorize Exo to read your emails and create drafts. A
-                browser window will open for you to sign in with Google.
+                browser window will open for you to sign in with{" "}
+                {selectedProvider === "gmail" ? "Google" : "Microsoft"}.
               </p>
 
               <div className="bg-yellow-50 dark:bg-yellow-900/30 p-4 rounded-lg mb-6">
@@ -412,9 +638,20 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
                   Permissions requested:
                 </h3>
                 <ul className="text-sm text-yellow-800 dark:text-yellow-300 space-y-1 list-disc list-inside">
-                  <li>Read your emails (gmail.readonly)</li>
-                  <li>Create draft emails (gmail.compose)</li>
-                  <li>View your calendar events (calendar.readonly)</li>
+                  {selectedProvider === "gmail" ? (
+                    <>
+                      <li>Read your emails (gmail.readonly)</li>
+                      <li>Create draft emails (gmail.compose)</li>
+                      <li>View your calendar events (calendar.readonly)</li>
+                    </>
+                  ) : (
+                    <>
+                      <li>Read your emails (Mail.Read)</li>
+                      <li>Send emails on your behalf (Mail.Send)</li>
+                      <li>Create draft emails (Mail.ReadWrite)</li>
+                      <li>Read your profile (User.Read)</li>
+                    </>
+                  )}
                 </ul>
               </div>
 
@@ -429,7 +666,9 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
                 disabled={isLoading}
                 className="w-full py-3 bg-green-600 dark:bg-green-500 text-white font-medium rounded-lg hover:bg-green-700 dark:hover:bg-green-600 transition-colors disabled:opacity-50"
               >
-                {isLoading ? "Authorizing..." : "Authorize with Google"}
+                {isLoading
+                  ? "Authorizing..."
+                  : `Authorize with ${selectedProvider === "gmail" ? "Google" : "Microsoft"}`}
               </button>
             </>
           )}
@@ -448,39 +687,85 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
                 {extensionAuths.map((ext) => (
                   <div
                     key={ext.extensionId}
-                    className="flex items-center justify-between p-4 border border-gray-200 dark:border-gray-600 rounded-lg"
+                    className="border border-gray-200 dark:border-gray-600 rounded-lg"
                   >
-                    <span className="font-medium text-gray-900 dark:text-gray-100">
-                      {ext.displayName}
-                    </span>
-                    {ext.needsAuth ? (
-                      <button
-                        onClick={() => handleExtensionAuth(ext.extensionId, ext.authType)}
-                        disabled={authenticatingExtension !== null}
-                        className="px-4 py-1.5 text-sm bg-blue-600 dark:bg-blue-500 text-white font-medium rounded-lg hover:bg-blue-700 dark:hover:bg-blue-600 transition-colors disabled:opacity-50"
-                      >
-                        {authenticatingExtension === ext.extensionId ? (
-                          <span className="flex items-center gap-2">
-                            <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                            Connecting...
-                          </span>
-                        ) : (
-                          "Login"
-                        )}
-                      </button>
-                    ) : (
-                      <span className="text-green-600 dark:text-green-400 flex items-center gap-1.5">
-                        <svg
-                          className="w-5 h-5"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                          strokeWidth={2}
-                        >
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                        </svg>
-                        Connected
+                    <div className="flex items-center justify-between p-4">
+                      <span className="font-medium text-gray-900 dark:text-gray-100">
+                        {ext.displayName}
                       </span>
+                      {ext.needsAuth ? (
+                        <button
+                          onClick={() => handleExtensionAuth(ext.extensionId, ext.authType)}
+                          disabled={authenticatingExtension !== null}
+                          className="px-4 py-1.5 text-sm bg-blue-600 dark:bg-blue-500 text-white font-medium rounded-lg hover:bg-blue-700 dark:hover:bg-blue-600 transition-colors disabled:opacity-50"
+                        >
+                          {authenticatingExtension === ext.extensionId ? (
+                            <span className="flex items-center gap-2">
+                              <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                              Connecting...
+                            </span>
+                          ) : (
+                            "Login"
+                          )}
+                        </button>
+                      ) : (
+                        <span className="text-green-600 dark:text-green-400 flex items-center gap-1.5">
+                          <svg
+                            className="w-5 h-5"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                            strokeWidth={2}
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                          </svg>
+                          Connected
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Asana PAT input — shown when user clicks Login */}
+                    {showAsanaTokenInput === ext.extensionId && (
+                      <div className="px-4 pb-4 space-y-3 border-t border-gray-200 dark:border-gray-600 pt-3">
+                        <p className="text-sm text-gray-500 dark:text-gray-400">
+                          Go to{" "}
+                          <a
+                            href="https://app.asana.com/0/my-apps"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 dark:text-blue-400 underline hover:no-underline"
+                          >
+                            app.asana.com/0/my-apps
+                          </a>{" "}
+                          and create a Personal Access Token.
+                        </p>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                            Personal Access Token
+                          </label>
+                          <input
+                            type="password"
+                            value={asanaPat}
+                            onChange={(e) => setAsanaPat(e.target.value)}
+                            onKeyDown={(e) =>
+                              e.key === "Enter" &&
+                              asanaPat.trim() &&
+                              handleExtensionAuth(ext.extensionId, ext.authType)
+                            }
+                            placeholder="1/12345678901234:abc..."
+                            className="w-full px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          />
+                        </div>
+                        <button
+                          onClick={() => handleExtensionAuth(ext.extensionId, ext.authType)}
+                          disabled={!asanaPat.trim() || authenticatingExtension !== null}
+                          className="w-full py-2 text-sm bg-blue-600 dark:bg-blue-500 text-white font-medium rounded-lg hover:bg-blue-700 dark:hover:bg-blue-600 transition-colors disabled:opacity-50"
+                        >
+                          {authenticatingExtension === ext.extensionId
+                            ? "Connecting..."
+                            : "Connect Asana"}
+                        </button>
+                      </div>
                     )}
                   </div>
                 ))}

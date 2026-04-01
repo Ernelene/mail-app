@@ -118,6 +118,7 @@ export interface InstalledExtensionInfo {
   hasRenderer: boolean;
   hasAgentProvider: boolean;
   agentProviderManifest?: AgentProviderManifest;
+  contributes?: ExtensionContributes;
   loadError?: string;
   providerHealthStatus?: "connected" | "not_configured" | "error";
   providerHealthMessage?: string;

@@ -1,6 +1,7 @@
 import { ipcMain, BrowserWindow } from "electron";
-import { GmailClient, isAuthError } from "../services/gmail-client";
+import { GmailClient } from "../services/gmail-client";
 import type { MailProvider } from "../services/mail-provider";
+import { isProviderAuthError as isAuthError } from "../services/mail-provider";
 import { createMailProvider } from "../services/provider-factory";
 import { emailSyncService, type SyncStatus, type AccountInfo } from "../services/email-sync";
 import { prefetchService } from "../services/prefetch-service";
@@ -242,8 +243,9 @@ export function registerSyncIpc(): void {
   emailSyncService.onAuthError((accountId, email) => {
     const window = getMainWindow();
     if (window) {
-      log.info(`[Auth] Sending token-expired event for ${email}`);
-      window.webContents.send("auth:token-expired", { accountId, email, source: "gmail" });
+      const provider = emailSyncService.getClientForAccount(accountId)?.providerType ?? "gmail";
+      log.info(`[Auth] Sending token-expired event for ${email} (${provider})`);
+      window.webContents.send("auth:token-expired", { accountId, email, source: provider });
     }
   });
 
@@ -873,7 +875,7 @@ export function registerSyncIpc(): void {
                 win.webContents.send("auth:token-expired", {
                   accountId: account.id,
                   email: account.email,
-                  source: "gmail",
+                  source: account.provider ?? "gmail",
                 });
               }
             }, 1000);

@@ -1,6 +1,7 @@
 import { ipcMain } from "electron";
 import { GmailClient } from "../services/gmail-client";
-import type { MailProvider } from "../services/mail-provider";
+import { OutlookClient } from "../services/outlook-client";
+import type { MailProvider, MailProviderType } from "../services/mail-provider";
 import { createMailProvider } from "../services/provider-factory";
 import { saveEmail, getEmailIds, getInboxEmails, getEmail, saveAccount, getAccounts } from "../db";
 import { getConfig } from "./settings.ipc";
@@ -58,7 +59,12 @@ export function registerGmailIpc(): void {
   ipcMain.handle(
     "gmail:check-auth",
     async (): Promise<
-      IpcResponse<{ hasCredentials: boolean; hasTokens: boolean; hasAnthropicKey: boolean }>
+      IpcResponse<{
+        hasCredentials: boolean;
+        hasTokens: boolean;
+        hasAnthropicKey: boolean;
+        configuredProvider?: "gmail" | "outlook";
+      }>
     > => {
       // In demo/test mode, always return authenticated
       if (useFakeData) {
@@ -73,14 +79,34 @@ export function registerGmailIpc(): void {
       }
 
       try {
-        const client = new GmailClient();
+        // Check both Gmail and Outlook credentials
+        const gmailClient = new GmailClient();
+        const outlookClient = new OutlookClient();
         const hasAnthropicKey = !!(process.env.ANTHROPIC_API_KEY || getConfig().anthropicApiKey);
+
+        const gmailHasCredentials = gmailClient.hasCredentials();
+        const outlookHasCredentials = outlookClient.hasCredentials();
+        const hasCredentials = gmailHasCredentials || outlookHasCredentials;
+
+        // Check tokens - if any account exists with tokens, we consider authenticated
+        const gmailHasTokens = gmailClient.hasTokens();
+        const outlookHasTokens = outlookClient.hasTokens();
+        const hasTokens = gmailHasTokens || outlookHasTokens;
+
+        // Report which provider has credentials so the renderer can pre-select it
+        const configuredProvider: "gmail" | "outlook" | undefined = outlookHasCredentials
+          ? "outlook"
+          : gmailHasCredentials
+            ? "gmail"
+            : undefined;
+
         return {
           success: true,
           data: {
-            hasCredentials: client.hasCredentials(),
-            hasTokens: client.hasTokens(),
+            hasCredentials,
+            hasTokens,
             hasAnthropicKey,
+            configuredProvider,
           },
         };
       } catch (error) {
@@ -97,14 +123,20 @@ export function registerGmailIpc(): void {
     "gmail:save-credentials",
     async (
       _,
-      { clientId, clientSecret }: { clientId: string; clientSecret: string },
+      {
+        clientId,
+        clientSecret,
+        providerType,
+      }: { clientId: string; clientSecret: string; providerType?: MailProviderType },
     ): Promise<IpcResponse<void>> => {
       if (useFakeData) {
         return { success: true, data: undefined };
       }
 
       try {
-        const client = new GmailClient();
+        // Default to gmail for backward compatibility
+        const resolvedProvider: MailProviderType = providerType || "gmail";
+        const client = createMailProvider("default", resolvedProvider);
         await client.saveCredentials(clientId, clientSecret);
         return { success: true, data: undefined };
       } catch (error) {
@@ -117,41 +149,63 @@ export function registerGmailIpc(): void {
   );
 
   // Start OAuth flow
-  ipcMain.handle("gmail:start-oauth", async (): Promise<IpcResponse<void>> => {
-    if (useFakeData) {
-      return { success: true, data: undefined };
-    }
-
-    try {
-      // Reset clients to force re-auth
-      mailClients.clear();
-      const client = await getClient("default");
-
-      // Get the user's profile to save the account
-      const profile = await client.getProfile();
-      const accountId = client.getAccountId();
-
-      // Save the account to the database if not already saved
-      const existingAccounts = getAccounts();
-      const alreadyExists = existingAccounts.some(
-        (a) => a.id === accountId || a.email === profile.emailAddress,
-      );
-
-      if (!alreadyExists) {
-        const displayName = await client.fetchDisplayName();
-        const isPrimary = existingAccounts.length === 0;
-        saveAccount(accountId, profile.emailAddress, displayName ?? undefined, isPrimary);
-        log.info(`[OAuth] Saved new account: ${profile.emailAddress} (${accountId})`);
+  ipcMain.handle(
+    "gmail:start-oauth",
+    async (
+      _,
+      { providerType }: { providerType?: MailProviderType },
+    ): Promise<IpcResponse<void>> => {
+      if (useFakeData) {
+        return { success: true, data: undefined };
       }
 
-      return { success: true, data: undefined };
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : "Unknown error",
-      };
-    }
-  });
+      try {
+        // Reset clients to force re-auth
+        mailClients.clear();
+
+        // Use provided provider type or default to gmail for backward compatibility
+        const resolvedProvider: MailProviderType = providerType || "gmail";
+        const client = createMailProvider("default", resolvedProvider);
+        await client.connect();
+
+        // Store client for reuse
+        mailClients.set("default", client);
+
+        // Get the user's profile to save the account
+        const profile = await client.getProfile();
+        const accountId = client.getAccountId();
+
+        // Save the account to the database if not already saved
+        const existingAccounts = getAccounts();
+        const alreadyExists = existingAccounts.some(
+          (a) => a.id === accountId || a.email === profile.emailAddress,
+        );
+
+        if (!alreadyExists) {
+          const displayName = await client.fetchDisplayName();
+          const isPrimary = existingAccounts.length === 0;
+          // Save account with the correct provider type
+          saveAccount(
+            accountId,
+            profile.emailAddress,
+            displayName ?? undefined,
+            isPrimary,
+            resolvedProvider,
+          );
+          log.info(
+            `[OAuth] Saved new account: ${profile.emailAddress} (${accountId}, provider: ${resolvedProvider})`,
+          );
+        }
+
+        return { success: true, data: undefined };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+        };
+      }
+    },
+  );
 
   // Fetch emails (all inbox or demo data)
   ipcMain.handle(

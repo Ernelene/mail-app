@@ -100,6 +100,14 @@ export interface MailProvider {
   setLastHistoryId(historyId: string | null): void;
   getHistoryChanges(startHistoryId: string): Promise<SyncChanges>;
 
+  /**
+   * Initialize the sync cursor after a full sync.
+   * For Gmail this is a no-op (historyId comes from getProfile).
+   * For Outlook this establishes the delta query cursor.
+   * Returns the cursor string to store, or null if not applicable.
+   */
+  initSyncCursor?(): Promise<string | null>;
+
   // ── Mutations ──
   archiveMessage(messageId: string): Promise<void>;
   batchArchive(messageIds: string[]): Promise<void>;

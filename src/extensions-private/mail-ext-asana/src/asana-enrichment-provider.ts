@@ -17,7 +17,11 @@ import type {
 import type { DashboardEmail } from "../../../shared/types";
 import type { AsanaClient, AsanaTask } from "./asana-client";
 
-const ASANA_TASK_URL_RE = /https:\/\/app\.asana\.com\/0\/\d+\/(\d+)/g;
+// Match both old and new Asana URL formats:
+//   Old: https://app.asana.com/0/{project_gid}/{task_gid}
+//   New: https://app.asana.com/1/{workspace_gid}/project/{project_gid}/task/{task_gid}
+const ASANA_TASK_URL_RE =
+  /https:\/\/app\.asana\.com\/(?:0\/\d+\/(\d+)|1\/\d+\/project\/\d+\/task\/(\d+))/g;
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 export function createAsanaEnrichmentProvider(
@@ -61,7 +65,7 @@ export function createAsanaEnrichmentProvider(
       if (email.body) {
         const urlMatches = [...email.body.matchAll(ASANA_TASK_URL_RE)];
         for (const match of urlMatches) {
-          const taskGid = match[1];
+          const taskGid = match[1] || match[2];
           if (seenGids.has(taskGid)) continue;
           seenGids.add(taskGid);
           try {

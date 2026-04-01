@@ -299,6 +299,9 @@ export class GmailClient implements MailProvider {
   }
 
   private async doOAuthFlow(): Promise<{ access_token: string; refresh_token: string }> {
+    // Clean up any leftover server from a previous attempt
+    this.abortOAuth();
+
     const oauth2Client = this.oauth2Client!;
 
     const authUrl = oauth2Client.generateAuthUrl({
@@ -336,7 +339,7 @@ export class GmailClient implements MailProvider {
             <html>
               <body style="font-family: system-ui; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0;">
                 <div style="text-align: center;">
-                  <h1>✓ Exo Connected</h1>
+                  <h1>Exo Connected</h1>
                   <p>You can close this tab and return to the application.</p>
                 </div>
               </body>
@@ -356,9 +359,26 @@ export class GmailClient implements MailProvider {
         }
       });
 
+      // Handle listen errors (e.g. port already in use from a stale process)
+      server.on("error", (err: NodeJS.ErrnoException) => {
+        cleanup();
+        if (err.code === "EADDRINUSE") {
+          reject(
+            new Error(
+              "OAuth callback port 3847 is already in use. " +
+                "Please close any other Exo instances and try again.",
+            ),
+          );
+        } else {
+          reject(new Error(`OAuth server error: ${err.message}`));
+        }
+      });
+
       // Store references so abortOAuth() can cancel this flow
       this.pendingOAuthServer = server;
       this.pendingOAuthReject = (reason: Error) => {
+        server.closeAllConnections();
+        server.close();
         cleanup();
         reject(reason);
       };

@@ -178,6 +178,10 @@ export class OutlookClient implements MailProvider {
   private pendingOAuthReject: ((reason: Error) => void) | null = null;
   private pendingOAuthTimeout: ReturnType<typeof setTimeout> | null = null;
 
+  // Maps opaque Graph API folder IDs → canonical label names.
+  // Populated at connect time by fetching well-known folders.
+  private folderIdToLabel: Map<string, string> = new Map();
+
   constructor(accountId: string = "default") {
     this.accountId = accountId;
   }
@@ -191,7 +195,35 @@ export class OutlookClient implements MailProvider {
   async connect(): Promise<void> {
     this.credentials = await this.loadCredentials();
     this.tokens = await this.loadOrRefreshTokens();
+    await this.loadWellKnownFolders();
     log.info(`Connected to Microsoft Graph API for account ${this.accountId}`);
+  }
+
+  /**
+   * Fetch well-known folder IDs from Graph API and build a lookup map.
+   * Graph returns opaque IDs for parentFolderId, so we need this mapping
+   * to assign canonical labels (INBOX, SENT, etc.) to messages.
+   */
+  private async loadWellKnownFolders(): Promise<void> {
+    const folderNames: Array<{ wellKnown: string; label: string }> = [
+      { wellKnown: FOLDER_INBOX, label: "INBOX" },
+      { wellKnown: FOLDER_SENT, label: "SENT" },
+      { wellKnown: FOLDER_DELETED, label: "TRASH" },
+      { wellKnown: FOLDER_DRAFTS, label: "DRAFT" },
+    ];
+
+    for (const { wellKnown, label } of folderNames) {
+      try {
+        const folder = await this.graphGet<{ id: string }>(
+          `/me/mailFolders/${wellKnown}?$select=id`,
+        );
+        this.folderIdToLabel.set(folder.id, label);
+      } catch (err) {
+        log.warn({ err }, `[Outlook] Failed to fetch folder ID for ${wellKnown}`);
+      }
+    }
+
+    log.info(`[Outlook] Resolved ${this.folderIdToLabel.size} well-known folder IDs`);
   }
 
   async disconnect(): Promise<void> {
@@ -538,6 +570,10 @@ export class OutlookClient implements MailProvider {
     }
   }
 
+  async initSyncCursor(): Promise<string | null> {
+    return this.initDeltaSync();
+  }
+
   /**
    * Initialize a delta query for the inbox folder.
    * Returns the initial deltaLink to be stored as the sync cursor.
@@ -790,6 +826,10 @@ export class OutlookClient implements MailProvider {
   }
 
   private async doOAuthFlow(): Promise<OutlookTokens> {
+    // Clean up any leftover server from a previous attempt (e.g. app restart
+    // while OAuth was in progress, or a previous timeout that didn't fully close)
+    this.abortOAuth();
+
     // PKCE: generate code_verifier and code_challenge
     const codeVerifier = randomBytes(32).toString("base64url");
     const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
@@ -847,8 +887,25 @@ export class OutlookClient implements MailProvider {
         }
       });
 
+      // Handle listen errors (e.g. port already in use from a stale process)
+      server.on("error", (err: NodeJS.ErrnoException) => {
+        cleanup();
+        if (err.code === "EADDRINUSE") {
+          reject(
+            new Error(
+              `OAuth callback port ${REDIRECT_PORT} is already in use. ` +
+                "Please close any other Exo instances and try again.",
+            ),
+          );
+        } else {
+          reject(new Error(`OAuth server error: ${err.message}`));
+        }
+      });
+
       this.pendingOAuthServer = server;
       this.pendingOAuthReject = (reason: Error) => {
+        server.closeAllConnections();
+        server.close();
         cleanup();
         reject(reason);
       };
@@ -1019,19 +1076,13 @@ export class OutlookClient implements MailProvider {
   private buildCanonicalLabels(msg: GraphMessage): string[] {
     const labels: string[] = [];
 
-    // Folder-based labels
-    const folderId = (msg.parentFolderId || "").toLowerCase();
-    if (folderId.includes("inbox") || folderId === FOLDER_INBOX) {
-      labels.push("INBOX");
-    }
-    if (folderId.includes("sent") || folderId === FOLDER_SENT) {
-      labels.push("SENT");
-    }
-    if (folderId.includes("deleted") || folderId === FOLDER_DELETED) {
-      labels.push("TRASH");
-    }
-    if (folderId.includes("draft") || folderId === FOLDER_DRAFTS) {
-      labels.push("DRAFT");
+    // Resolve opaque parentFolderId to canonical label via the lookup map
+    // populated at connect time from Graph API well-known folder queries.
+    if (msg.parentFolderId) {
+      const folderLabel = this.folderIdToLabel.get(msg.parentFolderId);
+      if (folderLabel) {
+        labels.push(folderLabel);
+      }
     }
 
     // Boolean flags → labels

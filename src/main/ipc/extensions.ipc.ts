@@ -213,6 +213,29 @@ export function registerExtensionsIpc(): void {
     },
   );
 
+  // Save secrets for an extension (e.g. Asana OAuth client credentials).
+  // Creates a temporary context to access the extension's secrets store —
+  // the same DB-backed storage the extension itself uses at runtime.
+  ipcMain.handle(
+    "extensions:save-secrets",
+    async (
+      _,
+      { extensionId, secrets }: { extensionId: string; secrets: Record<string, string> },
+    ): Promise<{ success: boolean; error?: string }> => {
+      try {
+        const { createExtensionContext } = await import("../extensions/extension-context");
+        const ctx = createExtensionContext(extensionId, "");
+        for (const [key, value] of Object.entries(secrets)) {
+          await ctx.secrets.set(key, value);
+        }
+        return { success: true };
+      } catch (error) {
+        log.error({ err: error }, `[Extensions IPC] save-secrets error for ${extensionId}`);
+        return { success: false, error: error instanceof Error ? error.message : "Unknown error" };
+      }
+    },
+  );
+
   // Install extension from .zip file
   ipcMain.handle(
     "extensions:install",

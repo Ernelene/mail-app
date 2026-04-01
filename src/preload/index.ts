@@ -22,9 +22,14 @@ const api = {
     getEmail: (emailId: string): Promise<unknown> =>
       ipcRenderer.invoke("gmail:get-email", { emailId }),
     checkAuth: (): Promise<unknown> => ipcRenderer.invoke("gmail:check-auth"),
-    saveCredentials: (clientId: string, clientSecret: string): Promise<unknown> =>
-      ipcRenderer.invoke("gmail:save-credentials", { clientId, clientSecret }),
-    startOAuth: (): Promise<unknown> => ipcRenderer.invoke("gmail:start-oauth"),
+    saveCredentials: (
+      clientId: string,
+      clientSecret: string,
+      providerType?: string,
+    ): Promise<unknown> =>
+      ipcRenderer.invoke("gmail:save-credentials", { clientId, clientSecret, providerType }),
+    startOAuth: (providerType?: string): Promise<unknown> =>
+      ipcRenderer.invoke("gmail:start-oauth", { providerType }),
   },
 
   // Analysis operations
@@ -602,6 +607,8 @@ const api = {
     list: (): Promise<unknown> => ipcRenderer.invoke("extensions:list"),
     authenticate: (extensionId: string): Promise<unknown> =>
       ipcRenderer.invoke("extensions:authenticate", { extensionId }),
+    saveSecrets: (extensionId: string, secrets: Record<string, string>): Promise<unknown> =>
+      ipcRenderer.invoke("extensions:save-secrets", { extensionId, secrets }),
     getPendingAuths: (): Promise<unknown> => ipcRenderer.invoke("extensions:get-pending-auths"),
     onEnrichmentReady: (
       callback: (data: { emailId: string; enrichment: unknown }) => void,

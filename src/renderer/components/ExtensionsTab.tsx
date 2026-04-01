@@ -41,6 +41,15 @@ export function ExtensionsTab() {
   } | null>(null);
   const [retryingProvider, setRetryingProvider] = useState<string | null>(null);
 
+  // Extension auth state (e.g. Asana PAT)
+  const [extensionTokens, setExtensionTokens] = useState<Record<string, string>>({});
+  const [authenticatingExt, setAuthenticatingExt] = useState<string | null>(null);
+  const [authMessage, setAuthMessage] = useState<{
+    id: string;
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
+
   // OpenClaw agent provider settings
   const [openclawEnabled, setOpenclawEnabled] = useState(false);
   const [openclawGatewayUrl, setOpenclawGatewayUrl] = useState("");
@@ -107,6 +116,52 @@ export function ExtensionsTab() {
     }
   }, []);
 
+  // Load extension settings (for regular extensions with contributes.settings)
+  const loadExtensionSettings = useCallback(async (ext: InstalledExtensionInfo) => {
+    if (!ext.contributes?.settings?.length) return;
+    const loaded: Record<string, unknown> = {};
+    for (const setting of ext.contributes.settings) {
+      try {
+        const result = (await window.api.extensions.getSetting(ext.id, setting.id)) as {
+          success: boolean;
+          data?: unknown;
+        };
+        if (result.success && result.data !== undefined) {
+          loaded[setting.id] = result.data;
+        } else {
+          loaded[setting.id] = setting.default;
+        }
+      } catch {
+        loaded[setting.id] = setting.default;
+      }
+    }
+    setProviderSettings((prev) => ({ ...prev, [ext.id]: loaded }));
+  }, []);
+
+  const handleSaveExtensionSettings = async (
+    extensionId: string,
+    settings: SettingDefinition[],
+  ) => {
+    setSavingSettings(extensionId);
+    setSettingsSaveMessage(null);
+    try {
+      const values = providerSettings[extensionId] ?? {};
+      for (const setting of settings) {
+        const value = values[setting.id] ?? setting.default;
+        await window.api.extensions.setSetting(extensionId, setting.id, value);
+      }
+      setSettingsSaveMessage({ id: extensionId, type: "success", text: "Settings saved" });
+    } catch (error) {
+      setSettingsSaveMessage({
+        id: extensionId,
+        type: "error",
+        text: error instanceof Error ? error.message : "Failed to save",
+      });
+    } finally {
+      setSavingSettings(null);
+    }
+  };
+
   const handleSaveSettings = async (extensionId: string) => {
     setSavingSettings(extensionId);
     setSettingsSaveMessage(null);
@@ -166,8 +221,11 @@ export function ExtensionsTab() {
       if (ext.agentProviderManifest?.contributes?.settings) {
         loadProviderSettings(ext);
       }
+      if (ext.contributes?.settings?.length) {
+        loadExtensionSettings(ext);
+      }
     }
-  }, [installedExtensions, checkAllProviderHealth, loadProviderSettings]);
+  }, [installedExtensions, checkAllProviderHealth, loadProviderSettings, loadExtensionSettings]);
 
   useEffect(() => {
     loadExtensions();
@@ -258,6 +316,53 @@ export function ExtensionsTab() {
     }
   };
 
+  const handleExtensionTokenSave = async (extensionId: string, secretKey: string) => {
+    const token = extensionTokens[extensionId]?.trim();
+    if (!token) return;
+
+    setAuthenticatingExt(extensionId);
+    setAuthMessage(null);
+
+    try {
+      // Save the token to extension secrets
+      const saveResult = (await window.api.extensions.saveSecrets(extensionId, {
+        [secretKey]: token,
+      })) as { success: boolean; error?: string };
+      if (!saveResult.success) {
+        setAuthMessage({
+          id: extensionId,
+          type: "error",
+          text: saveResult.error ?? "Failed to save token",
+        });
+        return;
+      }
+
+      // Trigger the auth handler to verify the token
+      const authResult = (await window.api.extensions.authenticate(extensionId)) as {
+        success: boolean;
+        error?: string;
+      };
+      if (authResult.success) {
+        setAuthMessage({ id: extensionId, type: "success", text: "Connected" });
+        setExtensionTokens((prev) => ({ ...prev, [extensionId]: "" }));
+      } else {
+        setAuthMessage({
+          id: extensionId,
+          type: "error",
+          text: authResult.error ?? "Token is invalid",
+        });
+      }
+    } catch (err) {
+      setAuthMessage({
+        id: extensionId,
+        type: "error",
+        text: err instanceof Error ? err.message : "Authentication failed",
+      });
+    } finally {
+      setAuthenticatingExt(null);
+    }
+  };
+
   return (
     <div className="max-w-3xl space-y-6">
       <div className="flex items-center justify-between">
@@ -334,6 +439,147 @@ export function ExtensionsTab() {
                         {ext.description}
                       </p>
                     )}
+
+                    {/* Asana PAT input */}
+                    {ext.id === "asana" && (
+                      <div className="mt-3 border-t border-gray-200 dark:border-gray-600 pt-3">
+                        <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
+                          Personal Access Token
+                        </label>
+                        <p className="text-xs text-gray-400 dark:text-gray-500 mb-2">
+                          Get yours at{" "}
+                          <a
+                            href="https://app.asana.com/0/my-apps"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 dark:text-blue-400 underline hover:no-underline"
+                          >
+                            app.asana.com/0/my-apps
+                          </a>{" "}
+                          &rarr; Personal Access Tokens &rarr; Create new token
+                        </p>
+                        <div className="flex gap-2">
+                          <input
+                            type="password"
+                            value={extensionTokens[ext.id] ?? ""}
+                            onChange={(e) =>
+                              setExtensionTokens((prev) => ({
+                                ...prev,
+                                [ext.id]: e.target.value,
+                              }))
+                            }
+                            onKeyDown={(e) =>
+                              e.key === "Enter" &&
+                              extensionTokens[ext.id]?.trim() &&
+                              handleExtensionTokenSave(ext.id, "asana_access_token")
+                            }
+                            placeholder="1/12345678901234:abc..."
+                            className="flex-1 px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                          />
+                          <button
+                            onClick={() => handleExtensionTokenSave(ext.id, "asana_access_token")}
+                            disabled={
+                              !extensionTokens[ext.id]?.trim() || authenticatingExt === ext.id
+                            }
+                            className="px-3 py-1 text-xs font-medium text-white bg-blue-600 dark:bg-blue-500 hover:bg-blue-700 dark:hover:bg-blue-600 rounded transition-colors disabled:opacity-50"
+                          >
+                            {authenticatingExt === ext.id ? "Saving..." : "Connect"}
+                          </button>
+                        </div>
+                        {authMessage?.id === ext.id && (
+                          <p
+                            className={`text-xs mt-1.5 ${authMessage.type === "success" ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}
+                          >
+                            {authMessage.text}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Extension settings (from contributes.settings in manifest) */}
+                    {ext.contributes?.settings && ext.contributes.settings.length > 0 && (
+                      <div className="mt-3 border-t border-gray-200 dark:border-gray-600 pt-3">
+                        <h5 className="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide mb-2">
+                          Settings
+                        </h5>
+                        <div className="space-y-2">
+                          {ext.contributes.settings.map((setting: SettingDefinition) => (
+                            <div key={setting.id}>
+                              <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-0.5">
+                                {setting.title}
+                              </label>
+                              {setting.description && (
+                                <p className="text-xs text-gray-400 dark:text-gray-500 mb-1">
+                                  {setting.description}
+                                </p>
+                              )}
+                              {setting.type === "boolean" ? (
+                                <input
+                                  type="checkbox"
+                                  checked={!!providerSettings[ext.id]?.[setting.id]}
+                                  onChange={(e) =>
+                                    setProviderSettings((prev) => ({
+                                      ...prev,
+                                      [ext.id]: {
+                                        ...prev[ext.id],
+                                        [setting.id]: e.target.checked,
+                                      },
+                                    }))
+                                  }
+                                  className="rounded border-gray-300 dark:border-gray-600"
+                                />
+                              ) : (
+                                <input
+                                  type={
+                                    setting.sensitive
+                                      ? "password"
+                                      : setting.type === "number"
+                                        ? "number"
+                                        : "text"
+                                  }
+                                  value={String(
+                                    providerSettings[ext.id]?.[setting.id] ?? setting.default ?? "",
+                                  )}
+                                  placeholder={setting.placeholder}
+                                  onChange={(e) =>
+                                    setProviderSettings((prev) => ({
+                                      ...prev,
+                                      [ext.id]: {
+                                        ...prev[ext.id],
+                                        [setting.id]:
+                                          setting.type === "number"
+                                            ? Number(e.target.value)
+                                            : e.target.value,
+                                      },
+                                    }))
+                                  }
+                                  className="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                                />
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                        <div className="flex items-center gap-2 mt-2">
+                          <button
+                            onClick={() =>
+                              handleSaveExtensionSettings(ext.id, ext.contributes!.settings!)
+                            }
+                            disabled={savingSettings === ext.id}
+                            className="px-3 py-1 text-xs font-medium text-white bg-blue-600 dark:bg-blue-500 hover:bg-blue-700 dark:hover:bg-blue-600 rounded transition-colors disabled:opacity-50"
+                          >
+                            {savingSettings === ext.id ? "Saving..." : "Save"}
+                          </button>
+                          {settingsSaveMessage?.id === ext.id && (
+                            <span
+                              className={`text-xs ${settingsSaveMessage.type === "success" ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}
+                            >
+                              {settingsSaveMessage.text}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
                     {ext.hasAgentProvider && healthStatuses[ext.id] && (
                       <div className="flex items-center gap-1.5 mt-1">
                         <span

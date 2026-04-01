@@ -1014,6 +1014,7 @@ export class ExtensionHost {
           hasRenderer: ext.path ? existsSync(join(ext.path, "dist", "renderer.js")) : false,
           hasAgentProvider: hasProviderJs,
           agentProviderManifest,
+          contributes: ext.manifest.contributes,
           loadError: (ext as unknown as { loadError?: string }).loadError,
         });
       }
