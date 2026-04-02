@@ -455,6 +455,37 @@ export class AsanaClient {
     return data.data;
   }
 
+  /**
+   * Update an existing task by GID.
+   */
+  async updateTask(
+    taskGid: string,
+    params: {
+      name?: string;
+      notes?: string;
+      assignee?: string;
+      due_on?: string | null;
+      completed?: boolean;
+    },
+  ): Promise<AsanaTask> {
+    const body: Record<string, unknown> = {};
+    if (params.name !== undefined) body.name = params.name;
+    if (params.notes !== undefined) body.notes = params.notes;
+    if (params.assignee !== undefined) body.assignee = params.assignee;
+    if (params.due_on !== undefined) body.due_on = params.due_on;
+    if (params.completed !== undefined) body.completed = params.completed;
+
+    const data = await this.put<{ data: AsanaTask }>(`/tasks/${taskGid}`, { data: body });
+    return data.data;
+  }
+
+  /**
+   * Add a comment/story to a task.
+   */
+  async addTaskComment(taskGid: string, text: string): Promise<void> {
+    await this.post(`/tasks/${taskGid}/stories`, { data: { text } });
+  }
+
   // ── HTTP helpers ──
 
   private async get<T>(path: string): Promise<T> {
@@ -469,6 +500,27 @@ export class AsanaClient {
     if (!resp.ok) {
       const body = await resp.text();
       const err = new Error(`Asana GET ${path} failed: ${resp.status} ${body}`);
+      (err as Record<string, unknown>).status = resp.status;
+      throw err;
+    }
+    return resp.json() as Promise<T>;
+  }
+
+  private async put<T>(path: string, body: unknown): Promise<T> {
+    if (!this.accessToken) throw new Error("Not authenticated with Asana");
+    const url = path.startsWith("http") ? path : `${ASANA_API_BASE}${path}`;
+    const resp = await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${this.accessToken}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const respBody = await resp.text();
+      const err = new Error(`Asana PUT ${path} failed: ${resp.status} ${respBody}`);
       (err as Record<string, unknown>).status = resp.status;
       throw err;
     }

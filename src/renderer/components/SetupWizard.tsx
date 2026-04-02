@@ -562,32 +562,97 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
           {step === "apikey" && (
             <>
               <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">
-                Anthropic API Key
+                Claude Authentication
               </h2>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Exo uses Claude to analyze your emails, generate drafts, and look up sender
-                information. You'll need an Anthropic API key to enable these features.
+                Exo uses Claude to analyze your emails, generate drafts, and power the AI agent.
+                Choose how to connect:
               </p>
 
-              <div className="bg-blue-50 dark:bg-blue-900/30 p-4 rounded-lg mb-6">
-                <h3 className="font-semibold text-blue-900 dark:text-blue-200 mb-2">
-                  Get your API key:
+              {/* Option 1: Claude Code Login */}
+              <div className="bg-purple-50 dark:bg-purple-900/30 p-4 rounded-lg mb-4 border border-purple-200 dark:border-purple-700">
+                <h3 className="font-semibold text-purple-900 dark:text-purple-200 mb-2">
+                  Recommended: Login with Claude Account
                 </h3>
-                <ol className="text-sm text-blue-800 dark:text-blue-300 space-y-2 list-decimal list-inside">
-                  <li>
-                    Go to{" "}
-                    <a
-                      href="https://console.anthropic.com/settings/keys"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="underline hover:no-underline"
-                    >
-                      console.anthropic.com
-                    </a>
-                  </li>
-                  <li>Create a new API key (or use an existing one)</li>
-                  <li>Paste it below</li>
-                </ol>
+                <p className="text-sm text-purple-800 dark:text-purple-300 mb-3">
+                  Use your Claude subscription (Pro/Max). No API key needed. Requires{" "}
+                  <a
+                    href="https://docs.anthropic.com/en/docs/claude-code/getting-started"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline hover:no-underline"
+                  >
+                    Claude Code CLI
+                  </a>{" "}
+                  to be installed.
+                </p>
+                <button
+                  onClick={async () => {
+                    setIsLoading(true);
+                    setError(null);
+                    try {
+                      const result = (await window.api.agent.claudeLogin()) as IpcResponse<{
+                        success: boolean;
+                        error?: string;
+                      }>;
+                      if (result.success && result.data.success) {
+                        // Claude login succeeded — skip API key, go to next step
+                        const authResult = (await window.api.gmail.checkAuth()) as IpcResponse<{
+                          hasCredentials: boolean;
+                          hasTokens: boolean;
+                          hasAnthropicKey: boolean;
+                        }>;
+                        if (authResult.success && authResult.data.hasTokens) {
+                          await enterExtensionsStep();
+                        } else {
+                          setStep("oauth");
+                        }
+                      } else {
+                        setError(
+                          result.success
+                            ? (result.data.error ?? "Claude login failed")
+                            : (result.error ?? "Claude login failed"),
+                        );
+                      }
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : "Claude login failed");
+                    } finally {
+                      setIsLoading(false);
+                    }
+                  }}
+                  disabled={isLoading}
+                  className="w-full py-2.5 bg-purple-600 dark:bg-purple-500 text-white font-medium rounded-lg hover:bg-purple-700 dark:hover:bg-purple-600 transition-colors disabled:opacity-50"
+                >
+                  {isLoading ? "Connecting..." : "Login with Claude Account"}
+                </button>
+              </div>
+
+              {/* Divider */}
+              <div className="flex items-center gap-3 my-4">
+                <div className="flex-1 h-px bg-gray-200 dark:bg-gray-600" />
+                <span className="text-xs text-gray-400 dark:text-gray-500 uppercase tracking-wide">
+                  or
+                </span>
+                <div className="flex-1 h-px bg-gray-200 dark:bg-gray-600" />
+              </div>
+
+              {/* Option 2: API Key */}
+              <div className="bg-blue-50 dark:bg-blue-900/30 p-4 rounded-lg mb-6 border border-blue-200 dark:border-blue-700">
+                <h3 className="font-semibold text-blue-900 dark:text-blue-200 mb-2">
+                  Use an API Key
+                </h3>
+                <p className="text-sm text-blue-800 dark:text-blue-300 mb-1">
+                  Get one from{" "}
+                  <a
+                    href="https://console.anthropic.com/settings/keys"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline hover:no-underline"
+                  >
+                    console.anthropic.com
+                  </a>
+                  . Requires API credits.
+                </p>
               </div>
 
               <div className="space-y-4 mb-6">
@@ -614,10 +679,10 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
 
               <button
                 onClick={handleSaveApiKey}
-                disabled={isLoading}
+                disabled={isLoading || !apiKey.trim()}
                 className="w-full py-3 bg-blue-600 dark:bg-blue-500 text-white font-medium rounded-lg hover:bg-blue-700 dark:hover:bg-blue-600 transition-colors disabled:opacity-50"
               >
-                {isLoading ? "Saving..." : "Continue"}
+                {isLoading ? "Saving..." : "Continue with API Key"}
               </button>
             </>
           )}

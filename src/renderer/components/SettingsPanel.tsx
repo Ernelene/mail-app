@@ -2477,8 +2477,8 @@ export function SettingsPanel({ onClose, initialTab }: SettingsPanelProps) {
                   )}
 
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-3">
-                    An API key above also enables the agent. Claude Account login is only needed if
-                    you don't have an API key.
+                    The embedded Claude agent uses the API key only when you explicitly save one in
+                    this app. Otherwise it uses your Claude Code login from above.
                   </p>
                 </div>
               )}

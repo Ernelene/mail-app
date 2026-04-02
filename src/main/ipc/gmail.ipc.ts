@@ -82,7 +82,13 @@ export function registerGmailIpc(): void {
         // Check both Gmail and Outlook credentials
         const gmailClient = new GmailClient();
         const outlookClient = new OutlookClient();
-        const hasAnthropicKey = !!(process.env.ANTHROPIC_API_KEY || getConfig().anthropicApiKey);
+        // Check for either an explicit API key or Claude Code OAuth login
+        const { readClaudeOAuthToken } = await import("../services/anthropic-service");
+        const hasAnthropicKey = !!(
+          process.env.ANTHROPIC_API_KEY ||
+          getConfig().anthropicApiKey ||
+          readClaudeOAuthToken()
+        );
 
         const gmailHasCredentials = gmailClient.hasCredentials();
         const outlookHasCredentials = outlookClient.hasCredentials();

@@ -236,17 +236,56 @@ export function registerAgentIpc(): void {
     "agent:claude-login",
     async (): Promise<IpcResponse<{ success: boolean; error?: string }>> => {
       try {
+        // If Claude Code is already authenticated, don't re-run the interactive
+        // login flow. This avoids confusing "command failed" cases when the CLI
+        // is already logged in and the browser flow is unnecessary.
+        const statusResult = await new Promise<{ authenticated: boolean }>((resolve) => {
+          const env = { ...process.env };
+          delete env.CLAUDECODE;
+          execFile(
+            "claude",
+            ["auth", "status", "--json"],
+            { env, timeout: 10000 },
+            (error, stdout) => {
+              if (error) {
+                resolve({ authenticated: false });
+                return;
+              }
+              try {
+                const parsed = JSON.parse(stdout) as { loggedIn?: boolean };
+                resolve({ authenticated: !!parsed.loggedIn });
+              } catch {
+                resolve({ authenticated: false });
+              }
+            },
+          );
+        });
+
+        if (statusResult.authenticated) {
+          return { success: true, data: { success: true } };
+        }
+
         const result = await new Promise<{ success: boolean; error?: string }>((resolve) => {
           const env = { ...process.env };
           delete env.CLAUDECODE;
           // `claude auth login` opens a browser for OAuth — wait for it to complete
           const child = execFile(
             "claude",
-            ["auth", "login"],
-            { env, timeout: 120000 },
+            ["auth", "login", "--claudeai"],
+            { env, timeout: 600000 },
             (error, _stdout, stderr) => {
               if (error) {
-                resolve({ success: false, error: stderr?.trim() || error.message });
+                const raw = stderr?.trim() || error.message;
+                const lower = raw.toLowerCase();
+                if (lower.includes("timed out") || lower.includes("etimedout")) {
+                  resolve({
+                    success: false,
+                    error:
+                      "Claude login did not complete in time. Finish the browser sign-in and try again.",
+                  });
+                  return;
+                }
+                resolve({ success: false, error: raw || "Claude login failed" });
               } else {
                 resolve({ success: true });
               }

@@ -409,7 +409,7 @@ interface SendReplyInput {
   references?: string;
 }
 
-const _sendReply: ToolDefinition<SendReplyInput> = {
+const sendReply: ToolDefinition<SendReplyInput> = {
   name: "send_reply",
   description:
     "Send a reply email. This is irreversible - the email will be delivered to recipients.",
@@ -533,4 +533,5 @@ export const tools: ToolDefinition[] = [
   createDraft as ToolDefinition,
   composeNewEmail as ToolDefinition,
   forwardEmail as ToolDefinition,
+  sendReply as ToolDefinition,
 ];

@@ -379,24 +379,30 @@ export class ExtensionHost {
         }
       }
 
-      // Check if we have cached enrichment for this sender email (cross-email cache)
-      const cachedBySender = getEnrichmentBySender(senderEmail, extensionId);
-      if (cachedBySender && cachedBySender.panelId === provider.panelId) {
-        // Save a copy for this email ID so future lookups are faster
-        saveEnrichment(
-          email.id,
-          {
-            extensionId: cachedBySender.extensionId,
-            panelId: cachedBySender.panelId,
-            data: cachedBySender.data,
-          },
-          senderEmail,
-        );
-        results.push(cachedBySender);
+      // Check if we have cached enrichment for this sender email (cross-email cache).
+      // Only use sender-based caching for sender-scoped panels — email-scoped panels
+      // (like Asana) have different content per email and must not reuse sender cache.
+      const panelScope =
+        this.sidebarPanels.get(`${extensionId}:${provider.panelId}`)?.scope ?? "sender";
+      if (panelScope === "sender") {
+        const cachedBySender = getEnrichmentBySender(senderEmail, extensionId);
+        if (cachedBySender && cachedBySender.panelId === provider.panelId) {
+          // Save a copy for this email ID so future lookups are faster
+          saveEnrichment(
+            email.id,
+            {
+              extensionId: cachedBySender.extensionId,
+              panelId: cachedBySender.panelId,
+              data: cachedBySender.data,
+            },
+            senderEmail,
+          );
+          results.push(cachedBySender);
 
-        // Notify listeners (batched to avoid flooding renderer)
-        this.notifyEnrichmentReady(email.id, cachedBySender);
-        continue;
+          // Notify listeners (batched to avoid flooding renderer)
+          this.notifyEnrichmentReady(email.id, cachedBySender);
+          continue;
+        }
       }
 
       // Skip new lookups if not allowed (navigation mode)

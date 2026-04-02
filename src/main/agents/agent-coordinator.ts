@@ -13,6 +13,7 @@ import { getConfig, getModelIdForFeature } from "../ipc/settings.ipc";
 import * as db from "../db";
 import { buildStyleContext } from "../services/style-profiler";
 import { buildAgentMemoryContext } from "../services/memory-context";
+import { readClaudeOAuthToken } from "../services/anthropic-service";
 import { DraftGenerator } from "../services/draft-generator";
 import { generateDraftForEmail, generateForwardForEmail } from "../services/draft-pipeline";
 import { saveDraftAndSync } from "../services/gmail-draft-sync";
@@ -157,7 +158,123 @@ export class AgentCoordinator {
       cc?: string[],
       bcc?: string[],
     ) => generateForwardForEmail({ emailId, accountId, instructions, to, cc, bcc }),
+    // Asana methods — uses extension secrets to create an AsanaClient on demand
+    asanaCreateTask: async (
+      workspaceGid: string,
+      name: string,
+      notes?: string,
+      assignee?: string,
+      dueOn?: string,
+      projects?: string[],
+    ) => {
+      const { createExtensionContext } = await import("../extensions/extension-context");
+      const { AsanaClient } =
+        await import("../../extensions-private/mail-ext-asana/src/asana-client");
+      const ctx = createExtensionContext("asana", "");
+      const client = new AsanaClient(ctx);
+      const loaded = await client.loadToken();
+      if (!loaded)
+        throw new Error("Asana not authenticated. Add your PAT in Settings > Extensions.");
+      return client.createTask({ workspaceGid, name, notes, assignee, due_on: dueOn, projects });
+    },
+    asanaSearchTasks: async (workspaceGid: string, query: string, maxResults?: number) => {
+      const { createExtensionContext } = await import("../extensions/extension-context");
+      const { AsanaClient } =
+        await import("../../extensions-private/mail-ext-asana/src/asana-client");
+      const ctx = createExtensionContext("asana", "");
+      const client = new AsanaClient(ctx);
+      const loaded = await client.loadToken();
+      if (!loaded)
+        throw new Error("Asana not authenticated. Add your PAT in Settings > Extensions.");
+      return client.searchTasks(workspaceGid, query, maxResults);
+    },
+    asanaListWorkspaces: async () => {
+      const { createExtensionContext } = await import("../extensions/extension-context");
+      const { AsanaClient } =
+        await import("../../extensions-private/mail-ext-asana/src/asana-client");
+      const ctx = createExtensionContext("asana", "");
+      const client = new AsanaClient(ctx);
+      const loaded = await client.loadToken();
+      if (!loaded)
+        throw new Error("Asana not authenticated. Add your PAT in Settings > Extensions.");
+      return client.listWorkspaces();
+    },
+    asanaUpdateTask: async (
+      taskGid: string,
+      name?: string,
+      notes?: string,
+      assignee?: string,
+      dueOn?: string | null,
+      completed?: boolean,
+    ) => {
+      const { createExtensionContext } = await import("../extensions/extension-context");
+      const { AsanaClient } =
+        await import("../../extensions-private/mail-ext-asana/src/asana-client");
+      const ctx = createExtensionContext("asana", "");
+      const client = new AsanaClient(ctx);
+      const loaded = await client.loadToken();
+      if (!loaded)
+        throw new Error("Asana not authenticated. Add your PAT in Settings > Extensions.");
+      return client.updateTask(taskGid, { name, notes, assignee, due_on: dueOn, completed });
+    },
+    asanaAddComment: async (taskGid: string, text: string) => {
+      const { createExtensionContext } = await import("../extensions/extension-context");
+      const { AsanaClient } =
+        await import("../../extensions-private/mail-ext-asana/src/asana-client");
+      const ctx = createExtensionContext("asana", "");
+      const client = new AsanaClient(ctx);
+      const loaded = await client.loadToken();
+      if (!loaded)
+        throw new Error("Asana not authenticated. Add your PAT in Settings > Extensions.");
+      return client.addTaskComment(taskGid, text);
+    },
+    asanaGetWorkspaceId: async () => {
+      const { getExtensionStorage } = await import("../db");
+      const raw = getExtensionStorage("asana", "setting:workspace_id");
+      if (!raw) return null;
+      try {
+        return JSON.parse(raw) as string;
+      } catch {
+        return raw;
+      }
+    },
   } as const;
+
+  private buildFrameworkConfig(): AgentFrameworkConfig {
+    const appConfig = getConfig();
+    // For the embedded Claude agent, only treat an API key explicitly saved in
+    // app settings as a real API-key configuration. Do NOT inherit
+    // ANTHROPIC_API_KEY from the parent shell/session, otherwise a stale shell
+    // key overrides Claude Code OAuth and sends the SDK down the billing path.
+    const explicitApiKey = appConfig.anthropicApiKey || undefined;
+    const claudeCodeOAuthToken = explicitApiKey ? undefined : (readClaudeOAuthToken() ?? undefined);
+
+    if (claudeCodeOAuthToken) {
+      log.info("[AgentCoordinator] Using Claude Code OAuth token for agent SDK");
+    }
+
+    return {
+      model: getModelIdForFeature("agentDrafter"),
+      anthropicApiKey: explicitApiKey,
+      claudeCodeOAuthToken,
+      browserConfig: appConfig.agentBrowser
+        ? {
+            enabled: appConfig.agentBrowser.enabled,
+            chromeDebugPort: appConfig.agentBrowser.chromeDebugPort,
+            chromeProfilePath: appConfig.agentBrowser.chromeProfilePath,
+          }
+        : undefined,
+      mcpServers: appConfig.mcpServers,
+      cliTools: appConfig.cliTools,
+      providers: {
+        "openclaw-agent": {
+          enabled: appConfig.openclaw?.enabled ?? false,
+          gatewayUrl: appConfig.openclaw?.gatewayUrl ?? "",
+          gatewayToken: appConfig.openclaw?.gatewayToken ?? "",
+        },
+      },
+    };
+  }
 
   start(mainWindow: BrowserWindow): void {
     if (this.started) return;
@@ -216,31 +333,7 @@ export class AgentCoordinator {
 
     // Auto-init the worker with framework config so it's ready for commands.
     // Config is enriched asynchronously by private provider modules before being sent.
-    // Read API key from app config first, fall back to env var; use undefined (not "")
-    // when neither exists so the SDK falls through to Claude Code's stored OAuth.
-    const appConfig = getConfig();
-    const apiKey = appConfig.anthropicApiKey || process.env.ANTHROPIC_API_KEY || undefined;
-    const browser = appConfig.agentBrowser;
-    const baseConfig: AgentFrameworkConfig = {
-      model: getModelIdForFeature("agentDrafter"),
-      anthropicApiKey: apiKey,
-      browserConfig: browser
-        ? {
-            enabled: browser.enabled,
-            chromeDebugPort: browser.chromeDebugPort,
-            chromeProfilePath: browser.chromeProfilePath,
-          }
-        : undefined,
-      mcpServers: appConfig.mcpServers,
-      cliTools: appConfig.cliTools,
-      providers: {
-        "openclaw-agent": {
-          enabled: appConfig.openclaw?.enabled ?? false,
-          gatewayUrl: appConfig.openclaw?.gatewayUrl ?? "",
-          gatewayToken: appConfig.openclaw?.gatewayToken ?? "",
-        },
-      },
-    };
+    const baseConfig = this.buildFrameworkConfig();
     this.workerReady = populatePrivateProviderConfig(baseConfig).then(
       (enrichedConfig) => {
         this.initWorker(enrichedConfig);
@@ -259,11 +352,7 @@ export class AgentCoordinator {
             type: "load_provider",
             providerId,
             providerPath,
-            config: {
-              model: getModelIdForFeature("agentDrafter"),
-              anthropicApiKey:
-                getConfig().anthropicApiKey || process.env.ANTHROPIC_API_KEY || undefined,
-            },
+            config: this.buildFrameworkConfig(),
           });
         }
       });
@@ -318,6 +407,10 @@ export class AgentCoordinator {
     if (this.workerReady) {
       await this.workerReady;
     }
+
+    // Refresh auth-bearing config before every run so the worker picks up a
+    // newly rotated Claude Code OAuth token without requiring an app restart.
+    this.updateConfig(this.buildFrameworkConfig());
 
     // Build memory context in the main process (where DB access is available)
     // and attach it to context so the worker can include it in the system prompt
@@ -497,11 +590,7 @@ export class AgentCoordinator {
     this.installedProviders.set(providerId, providerPath);
 
     // Send config_update first so worker has latest config
-    const appConfig = getConfig();
-    const config: AgentFrameworkConfig = {
-      model: getModelIdForFeature("agentDrafter"),
-      anthropicApiKey: appConfig.anthropicApiKey || process.env.ANTHROPIC_API_KEY || undefined,
-    };
+    const config = this.buildFrameworkConfig();
     this.sendToWorker({ type: "config_update", config });
 
     // Then send load_provider and wait for response

@@ -106,9 +106,56 @@ export function resetClient(): void {
   _defaultClient = null;
 }
 
+/**
+ * Read the Claude Code OAuth token from the macOS keychain.
+ * Always reads fresh from keychain (no caching) because other processes
+ * (e.g. a Claude Code terminal session) can refresh the token at any time,
+ * invalidating any cached copy.
+ * Falls back gracefully on non-macOS or if Claude Code isn't logged in.
+ */
+export function readClaudeOAuthToken(): string | null {
+  try {
+    const { execFileSync } = require("child_process") as typeof import("child_process");
+    const raw = execFileSync(
+      "security",
+      ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
+      { timeout: 3000, stdio: ["ignore", "pipe", "ignore"] },
+    ).toString();
+
+    const data = JSON.parse(raw) as {
+      claudeAiOauth?: { accessToken?: string };
+    };
+    return data?.claudeAiOauth?.accessToken ?? null;
+  } catch {
+    // Keychain not available, Claude Code not installed, or not logged in
+    return null;
+  }
+}
+
+/**
+ * Build or rebuild the Anthropic client.
+ * Priority: Claude Code OAuth > ANTHROPIC_API_KEY env var > bare (will fail).
+ */
+function buildClient(): Anthropic {
+  const oauthToken = readClaudeOAuthToken();
+  if (oauthToken) {
+    log.info("[Auth] Using Claude Code OAuth token for Anthropic client");
+    return new Anthropic({ apiKey: oauthToken });
+  }
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (apiKey) {
+    log.info("[Auth] Using ANTHROPIC_API_KEY for Anthropic client");
+    return new Anthropic({ apiKey });
+  }
+  log.warn("[Auth] No OAuth token or API key — Anthropic calls will fail");
+  return new Anthropic();
+}
+
 export function getClient(): Anthropic {
   if (_anthropicClient) return _anthropicClient;
-  if (!_defaultClient) _defaultClient = new Anthropic();
+  if (!_defaultClient) {
+    _defaultClient = buildClient();
+  }
   return _defaultClient;
 }
 
@@ -282,9 +329,10 @@ export async function createMessage(
   const model = params.model;
   const startTime = Date.now();
 
-  const client = getClient();
+  let client = getClient();
   let lastError: unknown = null;
   let totalAttempts = 0;
+  let authRetried = false;
 
   // Determine max retries across all categories
   const maxPossibleRetries = Math.max(...Object.values(RETRY_CONFIGS).map((c) => c.maxRetries));
@@ -333,6 +381,19 @@ export async function createMessage(
       return response;
     } catch (error) {
       lastError = error;
+
+      // If auth failed (401), try rebuilding the client with a fresh token
+      // from keychain (another process may have refreshed it). Only retry once.
+      const status = (error as Record<string, unknown>)?.status;
+      if (status === 401 && !authRetried) {
+        authRetried = true;
+        log.info("[Auth] 401 — rebuilding client with fresh keychain token");
+        _defaultClient = null;
+        client = buildClient();
+        _defaultClient = client;
+        continue;
+      }
+
       const category = getRetryCategory(error);
 
       if (!category) {

@@ -355,13 +355,26 @@ function ErrorBlock({
     );
   }
 
+  // Rate limit and transient errors get amber (warning) styling instead of red
+  const isTransient =
+    message.includes("rate limit") ||
+    message.includes("temporarily") ||
+    message.includes("wait a moment") ||
+    message.includes("overloaded") ||
+    message.includes("try again");
+
+  const bgClass = isTransient
+    ? "bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300"
+    : "bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300";
+  const btnClass = isTransient ? "bg-amber-600 hover:bg-amber-700" : "bg-red-600 hover:bg-red-700";
+
   return (
-    <div className="px-3 py-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-700 dark:text-red-300">
+    <div className={`px-3 py-2 border rounded-lg text-sm ${bgClass}`}>
       <p>{message}</p>
       {onRetry && (
         <button
           onClick={onRetry}
-          className="mt-2 px-3 py-1 text-xs font-medium bg-red-600 hover:bg-red-700 text-white rounded transition-colors"
+          className={`mt-2 px-3 py-1 text-xs font-medium text-white rounded transition-colors ${btnClass}`}
         >
           Retry
         </button>
@@ -449,6 +462,7 @@ function EventTimeline({ events, runFinished, onAuthRequest, onRetry }: EventTim
   const renderedElements: React.ReactNode[] = [];
   let textBuffer: ScopedAgentEvent[] = [];
   const toolResults = new Map<string, unknown>();
+  let lastRenderedErrorMessage: string | null = null;
 
   // Pre-scan: collect tool_call_end results
   for (const evt of events) {
@@ -528,10 +542,12 @@ function EventTimeline({ events, runFinished, onAuthRequest, onRetry }: EventTim
     flushText();
 
     if (evt.type === "user_message") {
+      lastRenderedErrorMessage = null;
       renderedElements.push(
         <UserMessageBlock key={`user-${renderedElements.length}`} text={evt.text} />,
       );
     } else if (evt.type === "tool_call_start") {
+      lastRenderedErrorMessage = null;
       const isDone = runFinished || toolResults.has(evt.toolCallId);
       renderedElements.push(
         <ToolCallEvent
@@ -552,6 +568,10 @@ function EventTimeline({ events, runFinished, onAuthRequest, onRetry }: EventTim
         />,
       );
     } else if (evt.type === "error") {
+      if (evt.message === lastRenderedErrorMessage) {
+        continue;
+      }
+      lastRenderedErrorMessage = evt.message;
       // For auth errors, prefer sourceProviderId (the actual sub-agent) over
       // providerId (the parent orchestrator) so the auth handler routes correctly
       const authProviderId = evt.sourceProviderId ?? evt.providerId;

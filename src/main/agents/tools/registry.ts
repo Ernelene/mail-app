@@ -93,17 +93,19 @@ export async function buildToolRegistry(): Promise<ToolRegistry> {
   const registry = new ToolRegistry();
 
   // Dynamically import tool modules to avoid circular deps
-  const [emailTools, analysisTools, contextTools, browserTools] = await Promise.all([
+  const [emailTools, analysisTools, contextTools, browserTools, asanaTools] = await Promise.all([
     import("./email-tools"),
     import("./analysis-tools"),
     import("./context-tools"),
     import("./browser-tools"),
+    import("./asana-tools"),
   ]);
 
   for (const tool of emailTools.tools) registry.register(tool);
   for (const tool of analysisTools.tools) registry.register(tool);
   for (const tool of contextTools.tools) registry.register(tool);
   for (const tool of browserTools.tools) registry.register(tool);
+  for (const tool of asanaTools.tools) registry.register(tool);
 
   return registry;
 }

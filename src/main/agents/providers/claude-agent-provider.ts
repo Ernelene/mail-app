@@ -1,6 +1,7 @@
 import { type z } from "zod";
 import path from "path";
 import { spawn as cpSpawn } from "child_process";
+import { readClaudeOAuthToken } from "../../services/anthropic-service";
 import {
   query,
   tool as sdkTool,
@@ -38,7 +39,7 @@ export class ClaudeAgentProvider implements AgentProvider {
     id: "claude",
     name: "Claude Agent",
     description: "Anthropic Claude with full tool access via Claude Agent SDK",
-    auth: { type: "api_key", configKey: "ANTHROPIC_API_KEY" },
+    auth: { type: "oauth" },
   };
 
   private frameworkConfig: AgentFrameworkConfig;
@@ -332,8 +333,8 @@ export class ClaudeAgentProvider implements AgentProvider {
 
   /**
    * Build the child process env for the SDK.
-   * If an API key is configured, include it. Otherwise, delete ANTHROPIC_API_KEY
-   * from the env entirely so Claude Code falls through to its stored OAuth.
+   * Prefer a real API key when explicitly configured. Otherwise pass the
+   * Claude Code OAuth token through the SDK's dedicated env var.
    */
   private buildChildEnv(): Record<string, string> {
     // Filter out undefined values — Node's child_process coerces undefined to "undefined"
@@ -341,10 +342,22 @@ export class ClaudeAgentProvider implements AgentProvider {
     for (const [key, value] of Object.entries(process.env)) {
       if (value !== undefined) env[key] = value;
     }
+    delete env.ANTHROPIC_API_KEY;
+    delete env.ANTHROPIC_AUTH_TOKEN;
+    delete env.CLAUDE_CODE_OAUTH_TOKEN;
+
     if (this.frameworkConfig.anthropicApiKey) {
       env.ANTHROPIC_API_KEY = this.frameworkConfig.anthropicApiKey;
     } else {
-      delete env.ANTHROPIC_API_KEY;
+      const oauthToken = this.frameworkConfig.claudeCodeOAuthToken ?? readClaudeOAuthToken();
+      if (oauthToken) {
+        env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
+        log.info(
+          `[Auth] Injected Claude OAuth token for SDK subprocess (prefix: ${oauthToken.substring(0, 15)}...)`,
+        );
+      } else {
+        log.warn("[Auth] No Claude OAuth token available and no API key — agent calls will fail");
+      }
     }
     // Prevent cli.js from detecting a "nested session" if CLAUDECODE leaks into
     // the Electron process env (e.g. when launched from a Claude Code terminal).
@@ -683,7 +696,7 @@ function* mapSdkMessage(message: SDKMessage): Generator<AgentEvent> {
       if (message.error) {
         yield {
           type: "error",
-          message: `Assistant message error: ${message.error}`,
+          message: humanizeAgentError(String(message.error)),
         };
       }
       break;
@@ -698,9 +711,11 @@ function* mapSdkMessage(message: SDKMessage): Generator<AgentEvent> {
         };
       } else {
         const errors = "errors" in message ? (message.errors as string[]) : [];
+        const rawMsg =
+          errors.length > 0 ? errors.join("; ") : `Agent ended with: ${message.subtype}`;
         yield {
           type: "error",
-          message: errors.length > 0 ? errors.join("; ") : `Agent ended with: ${message.subtype}`,
+          message: humanizeAgentError(rawMsg),
         };
       }
       break;
@@ -714,4 +729,28 @@ function* mapSdkMessage(message: SDKMessage): Generator<AgentEvent> {
 
     // system, user, and other types don't need to be forwarded to the UI
   }
+}
+
+/**
+ * Convert raw SDK error strings into user-friendly messages.
+ */
+function humanizeAgentError(raw: string): string {
+  const lower = raw.toLowerCase();
+  if (lower.includes("billing_error") || lower.includes("credit balance")) {
+    return "Claude agent authentication fell back to the wrong billing path. Please sign in again via Settings -> Agents and retry.";
+  }
+  if (lower.includes("rate_limit") || lower.includes("429")) {
+    return "Too many requests — the AI service is rate-limited. Please wait a moment and try again.";
+  }
+  if (
+    lower.includes("authentication") ||
+    lower.includes("invalid x-api-key") ||
+    lower.includes("401")
+  ) {
+    return "Authentication failed. Please check your Claude login in Settings > Agents.";
+  }
+  if (lower.includes("overloaded") || lower.includes("503") || lower.includes("529")) {
+    return "The AI service is temporarily overloaded. Please try again in a few seconds.";
+  }
+  return raw;
 }
