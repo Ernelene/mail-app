@@ -134,21 +134,189 @@ export function readClaudeOAuthToken(): string | null {
 
 /**
  * Build or rebuild the Anthropic client.
- * Priority: Claude Code OAuth > ANTHROPIC_API_KEY env var > bare (will fail).
+ *
+ * Note: Claude Code OAuth tokens cannot be used directly with the Anthropic SDK —
+ * api.anthropic.com rejects OAuth tokens. When using OAuth, we route calls through
+ * the Claude CLI subprocess instead (see createMessageViaCli below).
+ * This client is only used when a real API key is available.
  */
 function buildClient(): Anthropic {
-  const oauthToken = readClaudeOAuthToken();
-  if (oauthToken) {
-    log.info("[Auth] Using Claude Code OAuth token for Anthropic client");
-    return new Anthropic({ apiKey: oauthToken });
-  }
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (apiKey) {
     log.info("[Auth] Using ANTHROPIC_API_KEY for Anthropic client");
     return new Anthropic({ apiKey });
   }
-  log.warn("[Auth] No OAuth token or API key — Anthropic calls will fail");
+  // Return a client that will fail — callers should check useClaudeCliProxy() first
+  log.warn(
+    "[Auth] No API key — direct Anthropic SDK calls will fail. Claude CLI proxy should be used.",
+  );
   return new Anthropic();
+}
+
+/**
+ * Whether we should route API calls through the Claude CLI subprocess
+ * instead of using the Anthropic SDK directly.
+ *
+ * This is needed when the user has Claude Code OAuth but no API key,
+ * because api.anthropic.com doesn't accept OAuth tokens directly.
+ */
+function useClaudeCliProxy(): boolean {
+  // If there's an explicit API key, use the SDK directly
+  if (process.env.ANTHROPIC_API_KEY) return false;
+  // If Claude Code OAuth is available, use the CLI proxy
+  return readClaudeOAuthToken() !== null;
+}
+
+/**
+ * Create a message using the Claude CLI as a proxy.
+ * This routes through the CLI's first-party OAuth auth which has proper
+ * subscription rate limits (Max/Pro), unlike direct API key auth.
+ */
+async function createMessageViaCli(params: MessageCreateParamsNonStreaming): Promise<Message> {
+  const { execFile } = await import("child_process");
+
+  // Build the prompt from the messages array
+  // The CLI's -p mode only accepts a single string prompt, so we concatenate
+  // the conversation into a format Claude can understand.
+  const systemPrompt =
+    typeof params.system === "string"
+      ? params.system
+      : Array.isArray(params.system)
+        ? params.system.map((b) => b.text).join("\n")
+        : undefined;
+
+  // For single-turn messages (which is what all non-agent features use),
+  // extract the user message content
+  const lastUserMsg = params.messages.filter((m) => m.role === "user").pop();
+  let userContent = "";
+  if (lastUserMsg) {
+    if (typeof lastUserMsg.content === "string") {
+      userContent = lastUserMsg.content;
+    } else if (Array.isArray(lastUserMsg.content)) {
+      userContent = lastUserMsg.content
+        .filter((b): b is { type: "text"; text: string } => b.type === "text")
+        .map((b) => b.text)
+        .join("\n");
+    }
+  }
+
+  // If there are multiple turns, prepend assistant/user turns as context
+  if (params.messages.length > 1) {
+    const contextParts: string[] = [];
+    for (const msg of params.messages.slice(0, -1)) {
+      const role = msg.role === "user" ? "Human" : "Assistant";
+      const content =
+        typeof msg.content === "string"
+          ? msg.content
+          : Array.isArray(msg.content)
+            ? msg.content
+                .filter((b): b is { type: "text"; text: string } => b.type === "text")
+                .map((b) => b.text)
+                .join("\n")
+            : "";
+      contextParts.push(`${role}: ${content}`);
+    }
+    userContent = contextParts.join("\n\n") + "\n\nHuman: " + userContent;
+  }
+
+  const fullPrompt = systemPrompt
+    ? `<system>${systemPrompt}</system>\n\n${userContent}`
+    : userContent;
+
+  const args = [
+    "-p",
+    fullPrompt,
+    "--model",
+    params.model,
+    "--max-turns",
+    "1",
+    "--output-format",
+    "json",
+  ];
+
+  return new Promise<Message>((resolve, reject) => {
+    const env = { ...process.env };
+    delete env.CLAUDECODE;
+    // Pass the OAuth token explicitly
+    const oauthToken = readClaudeOAuthToken();
+    if (oauthToken) {
+      env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
+    }
+    delete env.ANTHROPIC_API_KEY;
+
+    execFile(
+      "claude",
+      args,
+      {
+        env,
+        timeout: 120000,
+        maxBuffer: 10 * 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(`Claude CLI proxy failed: ${stderr?.trim() || error.message}`));
+          return;
+        }
+
+        try {
+          const cliResult = JSON.parse(stdout) as {
+            result?: string;
+            is_error?: boolean;
+            session_id?: string;
+            cost_usd?: number;
+            duration_ms?: number;
+            num_turns?: number;
+            usage?: { input_tokens: number; output_tokens: number };
+          };
+
+          if (cliResult.is_error) {
+            reject(new Error(`Claude CLI returned error: ${cliResult.result}`));
+            return;
+          }
+
+          // Convert CLI result to Anthropic Message format.
+          // Cast to Message since we can't construct all required SDK fields
+          // (citations, cache tokens, etc.) from CLI output — callers only use
+          // content[0].text and usage.{input,output}_tokens.
+          const message = {
+            id: `msg_cli_${Date.now()}`,
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: cliResult.result ?? "" }],
+            model: params.model,
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: {
+              input_tokens: cliResult.usage?.input_tokens ?? 0,
+              output_tokens: cliResult.usage?.output_tokens ?? 0,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
+          } as unknown as Message;
+
+          resolve(message);
+        } catch {
+          // If JSON parsing fails, the output might be plain text (non-JSON mode)
+          const message = {
+            id: `msg_cli_${Date.now()}`,
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: stdout.trim() }],
+            model: params.model,
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: {
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
+          } as unknown as Message;
+          resolve(message);
+        }
+      },
+    );
+  });
 }
 
 export function getClient(): Anthropic {
@@ -328,6 +496,46 @@ export async function createMessage(
   const { caller, emailId, accountId, timeoutMs } = options;
   const model = params.model;
   const startTime = Date.now();
+
+  // When using Claude Code OAuth (no API key), route through the CLI proxy
+  // so calls go through the first-party subscription billing path.
+  if (useClaudeCliProxy()) {
+    try {
+      const response = await createMessageViaCli(params);
+
+      const usage = response.usage as unknown as Record<string, number>;
+      recordCall(
+        model,
+        caller,
+        emailId || null,
+        accountId || null,
+        usage.input_tokens || 0,
+        usage.output_tokens || 0,
+        usage.cache_read_input_tokens || 0,
+        usage.cache_creation_input_tokens || 0,
+        Date.now() - startTime,
+        true,
+        null,
+      );
+
+      return response;
+    } catch (error) {
+      recordCall(
+        model,
+        caller,
+        emailId || null,
+        accountId || null,
+        0,
+        0,
+        0,
+        0,
+        Date.now() - startTime,
+        false,
+        error instanceof Error ? error.message : String(error),
+      );
+      throw error;
+    }
+  }
 
   let client = getClient();
   let lastError: unknown = null;
